@@ -14,6 +14,16 @@ This is the simplified learning layout:
 
 Existing legacy wrappers remain in place for backward compatibility.
 
+## Echo UDP channels (Quick Start Appendix A)
+
+`benchmark-config.env` and `wrapper-echo-unified.sh` use the same four **`aeron:udp?endpoint=…|interface=…/24`** lines as **Aeron Benchmarks Quick Start Appendix A** (`wrapper-echo-java-two-nodes.sh`). To use a different mask, export **`CLIENT_SOURCE_CHANNEL`**, **`CLIENT_DESTINATION_CHANNEL`**, **`SERVER_SOURCE_CHANNEL`**, and **`SERVER_DESTINATION_CHANNEL`** before sourcing config or running the wrapper.
+
+## OpenOnload (`ONLOAD_COMMAND`)
+
+Benchmark scripts pass `--onload` to `remote-echo-benchmarks`. Cloud VMs (e.g. OCI) usually **do not** have the `onload` binary; the default is **`env`**, which runs Java/media-driver with no extra prefix. For Solarflare NICs and `java_vma` / `c_vma`, set:
+
+`export ONLOAD_COMMAND='onload --profile=latency'` (in `config/benchmark-config.env` or the shell).
+
 ## Driver modes
 
 Set `CLIENT_MODE`/`SERVER_MODE` (echo) or `CLUSTER_CLIENT_MODE`/`CLUSTER_SERVER_MODE` (cluster):

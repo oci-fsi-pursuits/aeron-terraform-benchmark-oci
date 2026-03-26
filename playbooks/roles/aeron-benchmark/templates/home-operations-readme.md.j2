@@ -1,0 +1,141 @@
+# Aeron OCI Stack Quick Operations Guide
+
+This node is the **controller/orchestrator** for the Aeron benchmark stack.
+
+## Where files are
+
+- Main install path: `{{ aeron_dir }}`
+- Aeron source: `{{ aeron_dir }}/aeron-src`
+- Aeron jars/scripts: `{{ aeron_dir }}/lib`, `{{ aeron_dir }}/bin`
+- Benchmark scripts/config: `{{ aeron_dir }}/benchmark`, `{{ aeron_dir }}/scripts`
+- `aeron-io/benchmarks` distribution: `{{ benchmarks_dist_path }}`
+- Benchmark matrix scripts: `{{ benchmarks_dist_path }}/scripts`
+- Status tracker: `/home/{{ ssh_username | default('ubuntu') }}/benchmark-status.txt`
+- Benchmark artifacts (when run): `/home/{{ ssh_username | default('ubuntu') }}/benchmark-results`
+
+## Cluster topology
+
+- `controller` (orchestrator): `{{ ansible_default_ipv4.address | default('unknown') }}`
+- `benchmark-1` (client): `{{ client_node_ip | default('not provided') }}`
+- `benchmark-2` (receiver): `{{ receiver_node_ip | default('not provided') }}`
+- `failover` (optional): `{{ failover_node_ip | default('not enabled') }}`
+
+## Node naming convention
+
+- Terraform display names follow:
+  - `<cluster-name>-controller`
+  - `<cluster-name>-benchmark-1` (client)
+  - `<cluster-name>-benchmark-2` (receiver)
+  - `<cluster-name>-failover` (optional)
+- Operational role names in scripts/docs:
+  - `controller`, `benchmark-1/client`, `benchmark-2/receiver`, `failover`
+
+## Passwordless SSH between nodes
+
+This stack configures passwordless SSH using the shared deployment key:
+
+- Dedicated inter-node key: `/home/{{ ssh_username | default('ubuntu') }}/.ssh/aeron-node-priv.key`
+- Aeron deploy key path: `{{ aeron_dir }}/.ssh/deploy_key`
+- Existing login keys (for controller access) are left unchanged.
+
+Quick checks:
+
+```bash
+ssh -o StrictHostKeyChecking=no {{ ssh_username | default('ubuntu') }}@{{ client_node_ip | default('127.0.0.1') }} 'hostname'
+ssh -o StrictHostKeyChecking=no {{ ssh_username | default('ubuntu') }}@{{ receiver_node_ip | default('127.0.0.1') }} 'hostname'
+```
+
+## Logs and results
+
+Controller provisioning status:
+
+```bash
+tail -n 50 /home/{{ ssh_username | default('ubuntu') }}/benchmark-status.txt
+```
+
+Benchmark result files:
+
+```bash
+ls -lah /home/{{ ssh_username | default('ubuntu') }}/benchmark-results
+```
+
+Key benchmark script logs:
+
+```bash
+ls -lah {{ benchmarks_dist_path }}/scripts/*.log
+```
+
+## Run / re-run benchmark tests
+
+Go to benchmark scripts:
+
+```bash
+cd {{ benchmarks_dist_path }}/scripts
+```
+
+Run echo matrix (all default modes):
+
+```bash
+CONFIG_FILE=./config/benchmark-config.env \
+MATRIX_MODES="{{ run_benchmarks_matrix_modes | default('java,java_vma,c,c_vma') }}" \
+./run-driver-matrix.sh echo
+```
+
+Run only one mode (example: java):
+
+```bash
+CONFIG_FILE=./config/benchmark-config.env MATRIX_MODES="java" ./run-driver-matrix.sh echo
+```
+
+Smoke profile (faster) using wrappers directly:
+
+```bash
+cd {{ benchmarks_dist_path }}/scripts
+SHOW_CONFIG_ONLY=1 ./wrapper-echo-unified.sh
+BENCH_PROFILE=smoke_288_101k CLIENT_MODE=java SERVER_MODE=java ./wrapper-echo-unified.sh
+```
+
+If failover/cluster is enabled, run cluster matrix:
+
+```bash
+CONFIG_FILE=./config/benchmark-config.env MATRIX_MODES="java,c" ./run-driver-matrix.sh cluster
+```
+
+## Change benchmark configuration
+
+Primary config file:
+
+- `{{ aeron_dir }}/scripts/config/benchmark-config.env`
+
+After editing config, sync it to matrix scripts:
+
+```bash
+cp -f {{ aeron_dir }}/scripts/config/benchmark-config.env {{ benchmarks_dist_path }}/scripts/config/benchmark-config.env
+```
+
+## Performance tuning and how to verify
+
+Applied tuning targets:
+
+- Hyperthreading preference: `{{ hyperthreading | default(false) }}`
+- Socket buffers (`rmem_max`, `wmem_max`): `{{ socket_buf | default('4194304') }}`
+- CPU pinning defaults:
+  - Housekeeping CPUs: `{{ housekeeping_cpus | default('0-1') }}`
+  - Isolated CPUs target: `{{ isolated_cpus | default('2-9') }}`
+  - IRQ affinity target: `{{ irq_affinity | default('0-1') }}`
+- Aeron latency-first knobs:
+  - `AERON_NETWORK_PUBLICATION_MAX_MESSAGES_PER_SEND={{ aeron_max_messages_per_send | default(1) }}`
+  - `AERON_RECEIVER_IO_VECTOR_CAPACITY={{ aeron_receiver_io_vector_capacity | default(1) }}`
+  - `AERON_SENDER_IO_VECTOR_CAPACITY={{ aeron_sender_io_vector_capacity | default(1) }}`
+
+Verification commands:
+
+```bash
+lscpu | egrep 'Thread\\(s\\) per core|CPU\\(s\\)'
+sysctl net.core.rmem_max net.core.wmem_max kernel.numa_balancing
+cat /etc/sysctl.d/99-aeron-benchmarks.conf
+ulimit -n
+grep -E 'isolcpus|nohz_full|rcu_nocbs|irqaffinity' /proc/cmdline || true
+```
+
+Note: kernel boot isolation flags are only present when GRUB isolation is enabled and the node is rebooted.

@@ -40,16 +40,13 @@
   register: benchmarks_tar_stat_after_build
   when: node_role | default('') == 'controller'
 
-- name: Extract benchmarks tar to benchmarks-dist (Gradle creates single top-level dir)
+- name: Extract benchmarks tar to benchmarks-dist
   shell: |
     set -e
     TAR="{{ aeron_dir }}/benchmarks-src/build/distributions/benchmarks.tar"
     rm -rf "{{ benchmarks_dist_path }}-bak" "{{ benchmarks_dist_path }}"
-    mkdir -p "{{ aeron_dir }}/_bench_extract"
-    tar -xf "$TAR" -C "{{ aeron_dir }}/_bench_extract"
-    TOP=$(ls -1 "{{ aeron_dir }}/_bench_extract" | head -1)
-    mv "{{ aeron_dir }}/_bench_extract/$TOP" "{{ benchmarks_dist_path }}"
-    rm -rf "{{ aeron_dir }}/_bench_extract"
+    mkdir -p "{{ benchmarks_dist_path }}"
+    tar -xf "$TAR" -C "{{ benchmarks_dist_path }}"
   args:
     executable: /bin/bash
   when: node_role | default('') == 'controller' and benchmarks_tar_stat_after_build.stat.exists | default(false)
@@ -64,23 +61,48 @@
     - "{{ benchmarks_dist_path }}/scripts/aeron"
   when: node_role | default('') == 'controller'
 
+# deployTar can merge a C media-driver package that overwrites scripts/aeron/media-driver with the
+# c-media-driver flow (exec aeronmd). Without aeronmd in the tarball, java echo fails. Source tree
+# always has the Java launcher (exec ../run-java io.aeron.driver.MediaDriver).
+- name: Restore Java media-driver and run-java from benchmarks source tree
+  copy:
+    src: "{{ item.src }}"
+    dest: "{{ item.dest }}"
+    mode: '0755'
+    remote_src: true
+    force: true
+  loop:
+    - src: "{{ aeron_dir }}/benchmarks-src/scripts/aeron/media-driver"
+      dest: "{{ benchmarks_dist_path }}/scripts/aeron/media-driver"
+    - src: "{{ aeron_dir }}/benchmarks-src/scripts/run-java"
+      dest: "{{ benchmarks_dist_path }}/scripts/run-java"
+  when: node_role | default('') == 'controller'
+
 - name: Find benchmark launcher executables in extracted distribution
   find:
     paths: "{{ benchmarks_dist_path }}"
     recurse: true
     file_type: file
     patterns:
-      - "remote-echo-benchmarks"
-      - "remote-cluster-benchmarks"
-      - "aggregate-results"
+      - "*remote-echo-benchmarks*"
+      - "*remote-cluster-benchmarks*"
+      - "*aggregate-results*"
   register: benchmarks_launcher_files
   when: node_role | default('') == 'controller'
 
+# deployTar may already place launchers at scripts/aeron/*. Symlinking dest -> same path causes ELOOP.
 - name: Resolve launcher executable paths
+  vars:
+    _echo_dest: "{{ benchmarks_dist_path }}/scripts/aeron/remote-echo-benchmarks"
+    _cluster_dest: "{{ benchmarks_dist_path }}/scripts/aeron/remote-cluster-benchmarks"
+    _agg_dest: "{{ benchmarks_dist_path }}/scripts/aggregate-results"
+    _echo_all: "{{ benchmarks_launcher_files.files | map(attribute='path') | select('search', '/remote-echo-benchmarks$') | list }}"
+    _cluster_all: "{{ benchmarks_launcher_files.files | map(attribute='path') | select('search', '/remote-cluster-benchmarks$') | list }}"
+    _agg_all: "{{ benchmarks_launcher_files.files | map(attribute='path') | select('search', '/aggregate-results$') | list }}"
   set_fact:
-    benchmarks_remote_echo_path: "{{ (benchmarks_launcher_files.files | map(attribute='path') | select('search', '/remote-echo-benchmarks$') | list | first) | default('') }}"
-    benchmarks_remote_cluster_path: "{{ (benchmarks_launcher_files.files | map(attribute='path') | select('search', '/remote-cluster-benchmarks$') | list | first) | default('') }}"
-    benchmarks_aggregate_results_path: "{{ (benchmarks_launcher_files.files | map(attribute='path') | select('search', '/aggregate-results$') | list | first) | default('') }}"
+    benchmarks_remote_echo_path: "{{ (_echo_all | difference([_echo_dest]) | first) | default(_echo_dest, true) }}"
+    benchmarks_remote_cluster_path: "{{ (_cluster_all | difference([_cluster_dest]) | first) | default(_cluster_dest, true) }}"
+    benchmarks_aggregate_results_path: "{{ (_agg_all | difference([_agg_dest]) | first) | default(_agg_dest, true) }}"
   when: node_role | default('') == 'controller'
 
 - name: Debug resolved benchmark launcher paths
@@ -102,7 +124,10 @@
       aggregate-results='{{ benchmarks_aggregate_results_path }}'
   when:
     - node_role | default('') == 'controller'
-    - benchmarks_remote_echo_path == '' or benchmarks_remote_cluster_path == '' or benchmarks_aggregate_results_path == ''
+    - >
+        (benchmarks_launcher_files.files | map(attribute='path') | select('search', '/remote-echo-benchmarks$') | list | length) == 0
+        or (benchmarks_launcher_files.files | map(attribute='path') | select('search', '/remote-cluster-benchmarks$') | list | length) == 0
+        or (benchmarks_launcher_files.files | map(attribute='path') | select('search', '/aggregate-results$') | list | length) == 0
 
 - name: Link launcher executables into stable scripts layout
   file:
@@ -117,7 +142,9 @@
       dest: "{{ benchmarks_dist_path }}/scripts/aeron/remote-cluster-benchmarks"
     - src: "{{ benchmarks_aggregate_results_path }}"
       dest: "{{ benchmarks_dist_path }}/scripts/aggregate-results"
-  when: node_role | default('') == 'controller'
+  when:
+    - node_role | default('') == 'controller'
+    - item.src != item.dest
 
 # Deploy benchmarks-dist to benchmark nodes so they can run echo/server side.
 # Requires benchmark_node_ips (comma-separated string, e.g. "10.0.1.2,10.0.1.3") and deploy_key on controller.

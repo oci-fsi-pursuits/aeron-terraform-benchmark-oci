@@ -5,6 +5,7 @@ cd "$(dirname "$0")"
 
 # Unified, config-first echo wrapper.
 # Keeps existing workflow by invoking aeron/remote-echo-benchmarks.
+# Default UDP channels match Aeron Benchmarks Quick Start Appendix A (literal /24).
 #
 # Supported driver modes:
 #   java | c | java_vma | c_vma | java-onload | c-onload | c-dpdk
@@ -17,10 +18,12 @@ cd "$(dirname "$0")"
 #   SHOW_CONFIG_ONLY=1 ./wrapper-echo-unified.sh
 
 pick_default_key() {
-  if [[ -f /home/ubuntu/.ssh/id_rsa ]]; then
-    echo "/home/ubuntu/.ssh/id_rsa"
-  elif [[ -f /home/ubuntu/.ssh/aeron-node-priv.key ]]; then
+  if [[ -f /home/ubuntu/.ssh/aeron-node-priv.key ]]; then
     echo "/home/ubuntu/.ssh/aeron-node-priv.key"
+  elif [[ -f /opt/aeron/.ssh/deploy_key ]]; then
+    echo "/opt/aeron/.ssh/deploy_key"
+  elif [[ -f /home/ubuntu/.ssh/id_rsa ]]; then
+    echo "/home/ubuntu/.ssh/id_rsa"
   else
     echo ""
   fi
@@ -149,7 +152,7 @@ CONTEXT="${CONTEXT:-echo-unified}"
 CLIENT_MODE="${CLIENT_MODE:-java}"
 SERVER_MODE="${SERVER_MODE:-java}"
 MTU_VALUE="${MTU_VALUE:-8K}"
-ONLOAD_COMMAND="${ONLOAD_COMMAND:-onload --profile=latency}"
+ONLOAD_COMMAND="${ONLOAD_COMMAND:-env}"
 SHOW_CONFIG_ONLY="${SHOW_CONFIG_ONLY:-0}"
 
 SSH_USER="${SSH_USER:-ubuntu}"
@@ -201,6 +204,7 @@ SERVER_ECHO_CPU_CORE="${SERVER_ECHO_CPU_CORE:-$(parse_profile_kv "$server_auto" 
 SERVER_CPU_NODE="${SERVER_CPU_NODE:-$(parse_profile_kv "$server_auto" cpu_node)}"
 
 # -------- Export expected environment --------
+# Echo UDP channels: match Aeron Benchmarks Quick Start Appendix A (literal /24 on local side).
 export SSH_CLIENT_USER="${SSH_USER}"
 export SSH_CLIENT_KEY_FILE="${SSH_KEY_FILE}"
 export SSH_CLIENT_NODE

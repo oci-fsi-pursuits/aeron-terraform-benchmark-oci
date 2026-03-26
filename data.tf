@@ -46,3 +46,9 @@ data "oci_core_vcns" "existing_vcns" {
   compartment_id = local.vcn_compartment
   state          = "AVAILABLE"
 }
+
+# Primary CIDR for NSG rules (aeron-io/benchmarks echo uses UDP ~13000/13100; must match your VCN).
+data "oci_core_vcn" "existing" {
+  count  = var.use_existing_vcn ? 1 : 0
+  vcn_id = var.existing_vcn_id
+}

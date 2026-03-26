@@ -219,6 +219,13 @@ variable "private_subnet_cidr" {
   default     = "10.0.1.0/24"
 }
 
+# When empty, uses VCN primary CIDR (existing VCN from data source, or vcn_cidr_block for new VCN).
+variable "aeron_benchmark_udp_ingress_cidr" {
+  type        = string
+  description = "Source CIDR for UDP ingress to benchmark echo/cluster ports (aeron-io defaults ~12000–14000). Set explicitly if echo fails to connect with existing VCN/security lists."
+  default     = ""
+}
+
 variable "private_deployment" {
   type        = bool
   description = "Deploy controller without public IP (requires VPN/FastConnect access)"

@@ -93,13 +93,23 @@ resource "oci_core_security_list" "public_security_list" {
     }
   }
 
-  # Aeron ports - Media Driver
+  # Aeron samples-style ports (Media Driver)
   ingress_security_rules {
     protocol = "17"
     source   = var.vcn_cidr_block
     udp_options {
       min = 40000
       max = 40100
+    }
+  }
+
+  # aeron-io/benchmarks echo defaults (~13000/13100)
+  ingress_security_rules {
+    protocol = "17"
+    source   = var.vcn_cidr_block
+    udp_options {
+      min = 12000
+      max = 14000
     }
   }
 

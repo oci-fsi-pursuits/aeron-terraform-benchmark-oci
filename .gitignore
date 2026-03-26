@@ -1,6 +1,6 @@
 # Terraform
 .terraform/
-.terraform.lock.hcl
+# Commit .terraform.lock.hcl for reproducible provider versions.
 *.tfstate
 *.tfstate.*
 *.tfvars
@@ -28,10 +28,21 @@ Thumbs.db
 # Logs
 *.log
 
-# Keys
+# Keys and local secrets
 *.pem
 *.key
 id_rsa*
+*.p12
+*.pfx
+
+# Archives (never commit ad-hoc zips/tarballs that might hold credentials or state)
+*.zip
+*.tgz
+
+# Local env / generated benchmark config (may contain IPs or paths)
+**/benchmark-config.env
+.env
+.env.*
 
 # Test files
 test.tfvars

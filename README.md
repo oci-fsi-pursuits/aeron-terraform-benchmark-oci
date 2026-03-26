@@ -232,6 +232,8 @@ After the stack apply completes, SSH to the controller and check:
 
 If `benchmarks-dist` or `.aeron-ready` is missing, Ansible may have failed; check apply logs and re-run if needed.
 
+**Echo benchmark log shows `c-media-driver` / `aeronmd: No such file or directory`:** `deployTar` can merge a C driver bundle that replaces `scripts/aeron/media-driver` with the native launcher, but `aeronmd` is not present unless that bundle is built. The Ansible `benchmarks-build` role restores the **Java** `media-driver` and `run-java` from `benchmarks-src` after each extract. To fix a live controller by hand: copy those two files from `/opt/aeron/benchmarks-src/scripts/` into `/opt/aeron/benchmarks-dist/scripts/` (see role `benchmarks-build`), then re-sync `benchmarks-dist` to benchmark nodes.
+
 ### Single-node: automated script
 
 On the controller or any benchmark node:
@@ -346,7 +348,9 @@ For reproducible baselines, keep the same profile (288B @ 101K), same socket buf
 
 ## Security and Cleanup
 
-- Aeron UDP (40000–40100) is allowed only within the VCN.
+- Aeron UDP (40000–40100) is allowed only within the VCN on **Terraform-managed** subnets.
+- **aeron-io/benchmarks** echo/cluster defaults use UDP **~12000–14000** (e.g. 13000/13100). The stack attaches an **NSG** with that range to benchmark/failover VNICs. With an **existing VCN**, the **private subnet security list must also allow** the same UDP range (or all traffic) from the VCN CIDR—OCI requires both NSG and security list to permit the flow. Override the source CIDR with Terraform variable `aeron_benchmark_udp_ingress_cidr` if needed.
+- Echo UDP channel URIs follow **Aeron Benchmarks Quick Start Appendix A** (literal **`|interface=<local-ip>/24`** on each side). They are emitted in `benchmark-config.env` from Terraform private IPs. If your subnet is not /24, override **`CLIENT_*_CHANNEL`** / **`SERVER_*_CHANNEL`** before running the wrapper.
 - Restrict SSH (e.g. security list or VPN) as needed.
 - Use `private_deployment = true` if the controller should have no public IP.
 

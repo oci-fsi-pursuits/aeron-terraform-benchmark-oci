@@ -1,0 +1,77 @@
+# -----------------------------------------------------------------------------
+# Example Terraform variable file — copy to local-test.tfvars (gitignored).
+#   cp local-test.tfvars.example local-test.tfvars
+# Never commit local-test.tfvars: it holds tenancy, compartment, network OCIDs,
+# and your SSH public key.
+# -----------------------------------------------------------------------------
+# Usage:
+#   terraform plan  -var-file="local-test.tfvars"
+#   terraform apply -var-file="local-test.tfvars"
+# -----------------------------------------------------------------------------
+
+# Required OCI identity inputs
+tenancy_ocid     = "ocid1.tenancy.oc1..REPLACE_WITH_YOUR_TENANCY_OCID"
+region           = "us-phoenix-1"
+compartment_ocid = "ocid1.compartment.oc1..REPLACE_WITH_YOUR_COMPARTMENT_OCID"
+
+# Public key content (not file path)
+ssh_public_key = "ssh-rsa AAAAB3...REPLACE_WITH_YOUR_PUBLIC_KEY comment@host"
+ssh_username   = "ubuntu"
+
+# -----------------------------------------------------------------------------
+# Cluster naming
+# -----------------------------------------------------------------------------
+use_custom_name = true
+cluster_name    = "aeron-local-test"
+
+# -----------------------------------------------------------------------------
+# Availability domains (examples for PHX — use your region’s AD names)
+# -----------------------------------------------------------------------------
+controller_ad = "pILZ:PHX-AD-2"
+benchmark_ad  = "pILZ:PHX-AD-2"
+
+enable_failover_node = true
+failover_ad          = "pILZ:PHX-AD-1"
+
+# -----------------------------------------------------------------------------
+# Node sizing
+# -----------------------------------------------------------------------------
+controller_shape     = "VM.Standard.E5.Flex"
+controller_ocpus     = 2
+controller_memory_gb = 16
+
+benchmark_shape        = "VM.Standard.E5.Flex"
+benchmark_node_count   = 2
+benchmark_ocpus        = 10
+benchmark_memory_gb    = 64
+
+failover_shape     = "VM.Standard.E5.Flex"
+failover_ocpus     = 10
+failover_memory_gb = 64
+
+# -----------------------------------------------------------------------------
+# Networking
+# -----------------------------------------------------------------------------
+use_sriov_networking = false
+hyperthreading       = false
+private_deployment   = false
+
+# Option A: existing VCN/subnets
+use_existing_vcn           = true
+existing_vcn_id            = "ocid1.vcn.oc1..REPLACE"
+existing_public_subnet_id  = "ocid1.subnet.oc1..REPLACE"
+existing_private_subnet_id = "ocid1.subnet.oc1..REPLACE"
+
+# Option B: new VCN (set use_existing_vcn = false)
+# vcn_cidr_block      = "10.0.0.0/16"
+# public_subnet_cidr  = "10.0.0.0/24"
+# private_subnet_cidr = "10.0.1.0/24"
+
+# -----------------------------------------------------------------------------
+# Image / software behavior
+# -----------------------------------------------------------------------------
+use_default_image = true
+install_aeron     = true
+
+run_benchmarks                = false
+run_benchmarks_matrix_modes   = "java"

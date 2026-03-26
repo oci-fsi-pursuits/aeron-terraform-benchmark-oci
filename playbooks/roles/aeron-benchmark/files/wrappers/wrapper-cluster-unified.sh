@@ -27,10 +27,12 @@ map_driver_mode() {
 }
 
 pick_default_key() {
-  if [[ -f /home/ubuntu/.ssh/id_rsa ]]; then
-    echo "/home/ubuntu/.ssh/id_rsa"
-  elif [[ -f /home/ubuntu/.ssh/aeron-node-priv.key ]]; then
+  if [[ -f /home/ubuntu/.ssh/aeron-node-priv.key ]]; then
     echo "/home/ubuntu/.ssh/aeron-node-priv.key"
+  elif [[ -f /opt/aeron/.ssh/deploy_key ]]; then
+    echo "/opt/aeron/.ssh/deploy_key"
+  elif [[ -f /home/ubuntu/.ssh/id_rsa ]]; then
+    echo "/home/ubuntu/.ssh/id_rsa"
   else
     echo ""
   fi
@@ -245,7 +247,7 @@ fi
 "aeron/remote-cluster-benchmarks" \
   --client-drivers "${CLIENT_DRIVER_ID}" \
   --server-drivers "${SERVER_DRIVER_ID}" \
-  --onload "${ONLOAD_COMMAND:-onload --profile=latency}" \
+  --onload "${ONLOAD_COMMAND:-env}" \
   --file-sync-level "${CLUSTER_FILE_SYNC_LEVEL:-0}" \
   --mtu "${MTU_VALUE}" \
   --context "${CLUSTER_CONTEXT:-cluster-unified}"

@@ -87,6 +87,13 @@
       Results go to: {{ aeron_dir }}/results/
     mode: '0644'
 
+- name: Create controller home operations README
+  template:
+    src: home-operations-readme.md.j2
+    dest: "/home/{{ ssh_username | default('ubuntu') }}/AERON-STACK-README.md"
+    mode: '0644'
+  when: node_role | default('') == 'controller'
+
 - name: Mark Aeron setup complete
   file:
     path: "{{ aeron_dir }}/.aeron-ready"

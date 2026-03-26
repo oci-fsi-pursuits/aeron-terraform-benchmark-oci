@@ -117,6 +117,7 @@ resource "oci_core_instance" "benchmark" {
     subnet_id        = local.private_subnet_id
     assign_public_ip = false
     hostname_label   = "benchmark-${count.index + 1}"
+    nsg_ids          = [oci_core_network_security_group.aeron_benchmark.id]
   }
 
   metadata = {
@@ -196,6 +197,7 @@ resource "oci_core_instance" "failover" {
     subnet_id        = local.private_subnet_id
     assign_public_ip = false
     hostname_label   = "failover"
+    nsg_ids          = [oci_core_network_security_group.aeron_benchmark.id]
   }
 
   metadata = {
@@ -237,7 +239,9 @@ resource "null_resource" "controller_provisioner" {
   depends_on = [oci_core_instance.controller, oci_core_instance.benchmark]
 
   triggers = {
-    instance_id = oci_core_instance.controller.id
+    instance_id      = oci_core_instance.controller.id
+    playbooks_bundle = data.archive_file.playbooks.id
+    provisioner_rev  = "2026-03-25-controller-ssh-readme"
   }
 
   connection {
@@ -266,11 +270,13 @@ resource "null_resource" "controller_provisioner" {
   provisioner "remote-exec" {
     inline = [
       "set -e",
+      "rm -rf /tmp/playbooks",
       "mkdir -p /tmp/playbooks",
       "unzip -q -o /tmp/playbooks.zip -d /tmp/playbooks",
       "rm -f /tmp/playbooks.zip",
       "sudo mkdir -p /opt/aeron",
-      "sudo mv /tmp/playbooks /opt/aeron/",
+      "sudo rm -rf /opt/aeron/playbooks",
+      "sudo mv /tmp/playbooks /opt/aeron/playbooks",
       "sudo chown -R ${var.ssh_username}:${var.ssh_username} /opt/aeron/playbooks",
       "echo 'Playbooks deployed to /opt/aeron/playbooks'",
     ]
@@ -282,12 +288,26 @@ resource "null_resource" "controller_provisioner" {
     destination = "/tmp/deploy_key.pem"
   }
 
+  provisioner "file" {
+    content     = tls_private_key.ssh.public_key_openssh
+    destination = "/tmp/deploy_key.pub"
+  }
+
   provisioner "remote-exec" {
     inline = [
+      "set -e",
+      "mkdir -p /home/${var.ssh_username}/.ssh",
+      "cp -f /tmp/deploy_key.pem /home/${var.ssh_username}/.ssh/aeron-node-priv.key",
+      "cp -f /tmp/deploy_key.pub /home/${var.ssh_username}/.ssh/aeron-node-priv.key.pub",
+      "touch /home/${var.ssh_username}/.ssh/authorized_keys",
+      "grep -q -F -f /home/${var.ssh_username}/.ssh/aeron-node-priv.key.pub /home/${var.ssh_username}/.ssh/authorized_keys || cat /home/${var.ssh_username}/.ssh/aeron-node-priv.key.pub >> /home/${var.ssh_username}/.ssh/authorized_keys",
+      "chmod 700 /home/${var.ssh_username}/.ssh",
+      "chmod 600 /home/${var.ssh_username}/.ssh/aeron-node-priv.key /home/${var.ssh_username}/.ssh/authorized_keys",
+      "chmod 644 /home/${var.ssh_username}/.ssh/aeron-node-priv.key.pub",
       "sudo mkdir -p /opt/aeron/.ssh",
       "sudo mv /tmp/deploy_key.pem /opt/aeron/.ssh/deploy_key",
       "sudo chmod 600 /opt/aeron/.ssh/deploy_key",
-      "sudo chown -R ${var.ssh_username}:${var.ssh_username} /opt/aeron/.ssh",
+      "sudo chown -R ${var.ssh_username}:${var.ssh_username} /opt/aeron/.ssh /home/${var.ssh_username}/.ssh",
     ]
   }
 
@@ -296,7 +316,7 @@ resource "null_resource" "controller_provisioner" {
       "set -e",
       "echo 'Running Ansible (Aeron, benchmarks repo, and wrapper setup)...'",
       "echo \"$(date -u +%Y-%m-%dT%H:%M:%SZ) controller-provisioner: ansible-start\" | tee -a /home/${var.ssh_username}/benchmark-status.txt",
-      "cd /opt/aeron/playbooks && ansible-playbook -i 'localhost,' -c local site.yml -e 'hyperthreading=true java_version=${var.java_version} aeron_git_repo=${var.aeron_git_repo} aeron_git_branch=${var.aeron_git_branch} benchmarks_repo_url=${var.benchmarks_repo_url} benchmarks_git_branch=${var.benchmarks_git_branch} run_benchmarks_matrix_modes=${var.run_benchmarks_matrix_modes} node_role=controller client_node_ip=${oci_core_instance.benchmark[0].private_ip} receiver_node_ip=${oci_core_instance.benchmark[1].private_ip} failover_node_ip=${var.enable_failover_node ? oci_core_instance.failover[0].private_ip : ""} benchmark_node_ips=${join(",", oci_core_instance.benchmark[*].private_ip)}' -v",
+      "cd /opt/aeron/playbooks && ansible-playbook -i 'localhost,' -c local site.yml -e 'hyperthreading=true java_version=${var.java_version} ssh_username=${var.ssh_username} aeron_git_repo=${var.aeron_git_repo} aeron_git_branch=${var.aeron_git_branch} benchmarks_repo_url=${var.benchmarks_repo_url} benchmarks_git_branch=${var.benchmarks_git_branch} run_benchmarks_matrix_modes=${var.run_benchmarks_matrix_modes} node_role=controller client_node_ip=${oci_core_instance.benchmark[0].private_ip} receiver_node_ip=${oci_core_instance.benchmark[1].private_ip} failover_node_ip=${var.enable_failover_node ? oci_core_instance.failover[0].private_ip : ""} benchmark_node_ips=${join(",", oci_core_instance.benchmark[*].private_ip)}' -v",
       "echo \"$(date -u +%Y-%m-%dT%H:%M:%SZ) controller-provisioner: ansible-complete\" | tee -a /home/${var.ssh_username}/benchmark-status.txt",
       "sudo chown -R ${var.ssh_username}:${var.ssh_username} /opt/aeron",
       "echo 'Ansible complete. Check /opt/aeron/benchmarks-dist and /opt/aeron/scripts'",
@@ -315,7 +335,9 @@ resource "null_resource" "benchmark_provisioner" {
   depends_on = [oci_core_instance.benchmark, null_resource.controller_provisioner]
 
   triggers = {
-    instance_id = oci_core_instance.benchmark[count.index].id
+    instance_id      = oci_core_instance.benchmark[count.index].id
+    playbooks_bundle = data.archive_file.playbooks.id
+    provisioner_rev  = "2026-03-25-node-ssh-keysync-dedicated-key"
   }
 
   connection {
@@ -349,13 +371,45 @@ resource "null_resource" "benchmark_provisioner" {
     inline = [
       "#!/bin/bash",
       "set -e",
+      "rm -rf /tmp/playbooks",
       "mkdir -p /tmp/playbooks",
       "unzip -q -o /tmp/playbooks.zip -d /tmp/playbooks",
       "rm -f /tmp/playbooks.zip",
       "sudo mkdir -p /opt/aeron",
-      "sudo mv /tmp/playbooks /opt/aeron/",
+      "sudo rm -rf /opt/aeron/playbooks",
+      "sudo mv /tmp/playbooks /opt/aeron/playbooks",
       "sudo chown -R ${var.ssh_username}:${var.ssh_username} /opt/aeron",
-      var.install_aeron ? "cd /opt/aeron/playbooks && ansible-playbook -i 'localhost,' -c local site.yml -e 'hyperthreading=${var.hyperthreading} java_version=${var.java_version} aeron_git_repo=${var.aeron_git_repo} aeron_git_branch=${var.aeron_git_branch} node_role=${count.index == 0 ? "client" : "receiver"}'" : "echo 'Skipping Aeron installation'",
+      var.install_aeron ? "cd /opt/aeron/playbooks && ansible-playbook -i 'localhost,' -c local site.yml -e 'hyperthreading=${var.hyperthreading} java_version=${var.java_version} ssh_username=${var.ssh_username} aeron_git_repo=${var.aeron_git_repo} aeron_git_branch=${var.aeron_git_branch} node_role=${count.index == 0 ? "client" : "receiver"}'" : "echo 'Skipping Aeron installation'",
+    ]
+  }
+
+  # Distribute same SSH key so nodes can SSH between each other passwordlessly.
+  provisioner "file" {
+    content     = tls_private_key.ssh.private_key_pem
+    destination = "/tmp/deploy_key.pem"
+  }
+
+  provisioner "file" {
+    content     = tls_private_key.ssh.public_key_openssh
+    destination = "/tmp/deploy_key.pub"
+  }
+
+  provisioner "remote-exec" {
+    inline = [
+      "set -e",
+      "mkdir -p /home/${var.ssh_username}/.ssh",
+      "mv /tmp/deploy_key.pem /home/${var.ssh_username}/.ssh/aeron-node-priv.key",
+      "mv /tmp/deploy_key.pub /home/${var.ssh_username}/.ssh/aeron-node-priv.key.pub",
+      "chmod 700 /home/${var.ssh_username}/.ssh",
+      "chmod 600 /home/${var.ssh_username}/.ssh/aeron-node-priv.key",
+      "chmod 644 /home/${var.ssh_username}/.ssh/aeron-node-priv.key.pub",
+      "touch /home/${var.ssh_username}/.ssh/authorized_keys",
+      "grep -q -F -f /home/${var.ssh_username}/.ssh/aeron-node-priv.key.pub /home/${var.ssh_username}/.ssh/authorized_keys || cat /home/${var.ssh_username}/.ssh/aeron-node-priv.key.pub >> /home/${var.ssh_username}/.ssh/authorized_keys",
+      "chmod 600 /home/${var.ssh_username}/.ssh/authorized_keys",
+      "sudo mkdir -p /opt/aeron/.ssh",
+      "sudo cp /home/${var.ssh_username}/.ssh/aeron-node-priv.key /opt/aeron/.ssh/deploy_key",
+      "sudo chmod 600 /opt/aeron/.ssh/deploy_key",
+      "sudo chown -R ${var.ssh_username}:${var.ssh_username} /opt/aeron/.ssh /home/${var.ssh_username}/.ssh",
     ]
   }
 }
@@ -368,7 +422,9 @@ resource "null_resource" "failover_provisioner" {
   depends_on = [oci_core_instance.failover, null_resource.controller_provisioner]
 
   triggers = {
-    instance_id = oci_core_instance.failover[0].id
+    instance_id      = oci_core_instance.failover[0].id
+    playbooks_bundle = data.archive_file.playbooks.id
+    provisioner_rev  = "2026-03-25-node-ssh-keysync-dedicated-key"
   }
 
   connection {
@@ -402,13 +458,45 @@ resource "null_resource" "failover_provisioner" {
     inline = [
       "#!/bin/bash",
       "set -e",
+      "rm -rf /tmp/playbooks",
       "mkdir -p /tmp/playbooks",
       "unzip -q -o /tmp/playbooks.zip -d /tmp/playbooks",
       "rm -f /tmp/playbooks.zip",
       "sudo mkdir -p /opt/aeron",
-      "sudo mv /tmp/playbooks /opt/aeron/",
+      "sudo rm -rf /opt/aeron/playbooks",
+      "sudo mv /tmp/playbooks /opt/aeron/playbooks",
       "sudo chown -R ${var.ssh_username}:${var.ssh_username} /opt/aeron",
-      var.install_aeron ? "cd /opt/aeron/playbooks && ansible-playbook -i 'localhost,' -c local site.yml -e 'hyperthreading=${var.hyperthreading} java_version=${var.java_version} aeron_git_repo=${var.aeron_git_repo} aeron_git_branch=${var.aeron_git_branch} node_role=failover'" : "echo 'Skipping Aeron installation'",
+      var.install_aeron ? "cd /opt/aeron/playbooks && ansible-playbook -i 'localhost,' -c local site.yml -e 'hyperthreading=${var.hyperthreading} java_version=${var.java_version} ssh_username=${var.ssh_username} aeron_git_repo=${var.aeron_git_repo} aeron_git_branch=${var.aeron_git_branch} node_role=failover'" : "echo 'Skipping Aeron installation'",
+    ]
+  }
+
+  # Distribute same SSH key so nodes can SSH between each other passwordlessly.
+  provisioner "file" {
+    content     = tls_private_key.ssh.private_key_pem
+    destination = "/tmp/deploy_key.pem"
+  }
+
+  provisioner "file" {
+    content     = tls_private_key.ssh.public_key_openssh
+    destination = "/tmp/deploy_key.pub"
+  }
+
+  provisioner "remote-exec" {
+    inline = [
+      "set -e",
+      "mkdir -p /home/${var.ssh_username}/.ssh",
+      "mv /tmp/deploy_key.pem /home/${var.ssh_username}/.ssh/aeron-node-priv.key",
+      "mv /tmp/deploy_key.pub /home/${var.ssh_username}/.ssh/aeron-node-priv.key.pub",
+      "chmod 700 /home/${var.ssh_username}/.ssh",
+      "chmod 600 /home/${var.ssh_username}/.ssh/aeron-node-priv.key",
+      "chmod 644 /home/${var.ssh_username}/.ssh/aeron-node-priv.key.pub",
+      "touch /home/${var.ssh_username}/.ssh/authorized_keys",
+      "grep -q -F -f /home/${var.ssh_username}/.ssh/aeron-node-priv.key.pub /home/${var.ssh_username}/.ssh/authorized_keys || cat /home/${var.ssh_username}/.ssh/aeron-node-priv.key.pub >> /home/${var.ssh_username}/.ssh/authorized_keys",
+      "chmod 600 /home/${var.ssh_username}/.ssh/authorized_keys",
+      "sudo mkdir -p /opt/aeron/.ssh",
+      "sudo cp /home/${var.ssh_username}/.ssh/aeron-node-priv.key /opt/aeron/.ssh/deploy_key",
+      "sudo chmod 600 /opt/aeron/.ssh/deploy_key",
+      "sudo chown -R ${var.ssh_username}:${var.ssh_username} /opt/aeron/.ssh /home/${var.ssh_username}/.ssh",
     ]
   }
 }
@@ -429,6 +517,9 @@ resource "null_resource" "run_driver_matrix" {
     controller_instance_id = oci_core_instance.controller.id
     benchmark_instance_ids = join(",", oci_core_instance.benchmark[*].id)
     run_benchmarks         = tostring(var.run_benchmarks)
+    matrix_modes           = var.run_benchmarks_matrix_modes
+    # Bump when changing remote-exec steps (e.g. benchmark preflight) so apply re-runs the matrix.
+    matrix_exec_rev        = "dev-shm-precleanup-v2"
   }
 
   connection {
@@ -451,6 +542,8 @@ resource "null_resource" "run_driver_matrix" {
       "mkdir -p ./config",
       "cp -f /opt/aeron/scripts/config/benchmark-config.env ./config/benchmark-config.env",
       "echo \"$(date -u +%Y-%m-%dT%H:%M:%SZ) run-driver-matrix: config-ready\" | tee -a \"$STATUS_FILE\"",
+      "echo \"$(date -u +%Y-%m-%dT%H:%M:%SZ) run-driver-matrix: sudo rm /dev/shm/aeron on benchmark nodes (root-owned dir breaks MediaDriver)\" | tee -a \"$STATUS_FILE\"",
+      "${local.benchmark_dev_shm_cleanup}",
       "chmod +x ./wrapper-echo-unified.sh ./wrapper-cluster-unified.sh ./aggregate-compare-results.sh ./run-driver-matrix.sh || true",
       "export CONFIG_FILE=./config/benchmark-config.env",
       "export MATRIX_MODES=\"${var.run_benchmarks_matrix_modes}\"",

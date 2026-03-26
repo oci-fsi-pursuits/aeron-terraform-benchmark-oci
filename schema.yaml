@@ -87,6 +87,7 @@ variableGroups:
       - vcn_cidr_block
       - public_subnet_cidr
       - private_subnet_cidr
+      - aeron_benchmark_udp_ingress_cidr
       - private_deployment
 
   - title: "Image Configuration"
@@ -504,6 +505,12 @@ variables:
       eq:
         - ${use_existing_vcn}
         - false
+
+  aeron_benchmark_udp_ingress_cidr:
+    type: string
+    title: "Benchmark UDP ingress CIDR (optional)"
+    description: "Source CIDR for aeron-io/benchmarks UDP (ports ~12000-14000). Leave empty to use VCN CIDR. Existing VCN: also open the same range on the private subnet security list."
+    default: ""
 
   private_deployment:
     type: boolean
