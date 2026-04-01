@@ -51,7 +51,7 @@ failover_shape     = "VM.Standard.E6.Flex"
 failover_ocpus     = 16
 failover_memory_gb = 124
 
-# benchmark_cluster_placement_group = "auto" # auto|on|off — auto creates CPG when use_existing_vcn is false
+# create_benchmark_cluster_placement_group = true  # ignored when use_existing_vcn = true
 
 # -----------------------------------------------------------------------------
 # Networking

@@ -129,13 +129,6 @@ variable "failover_ad" {
   type        = string
   description = "Availability Domain for the failover node (must be different from benchmark nodes)"
   default     = ""
-
-  validation {
-    condition = !var.enable_failover_node || (
-      length(trimspace(var.failover_ad)) > 0 && var.failover_ad != var.benchmark_ad
-    )
-    error_message = "When enable_failover_node is true, failover_ad must be non-empty and must not match benchmark_ad (choose a different AD)."
-  }
 }
 
 variable "failover_shape" {
@@ -195,15 +188,10 @@ variable "use_existing_vcn" {
   default     = false
 }
 
-variable "benchmark_cluster_placement_group" {
-  type        = string
-  description = "Cluster placement group in benchmark_ad for benchmark VMs (physical proximity). auto: create when use_existing_vcn is false, skip when true. on: always create. off: never."
-  default     = "auto"
-
-  validation {
-    condition     = contains(["auto", "on", "off"], var.benchmark_cluster_placement_group)
-    error_message = "benchmark_cluster_placement_group must be auto, on, or off."
-  }
+variable "create_benchmark_cluster_placement_group" {
+  type        = bool
+  description = "Create a cluster placement group in benchmark_ad for benchmark VMs (physical proximity). Ignored when use_existing_vcn is true."
+  default     = true
 }
 
 variable "vcn_compartment_ocid" {

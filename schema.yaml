@@ -75,12 +75,11 @@ variableGroups:
   - title: "Performance Settings"
     variables:
       - hyperthreading
-      - benchmark_cluster_cpu_affinity
 
   - title: "Network Configuration"
     variables:
       - use_existing_vcn
-      - benchmark_cluster_placement_group
+      - create_benchmark_cluster_placement_group
       - vcn_compartment_ocid
       - existing_vcn_id
       - existing_public_subnet_id
@@ -102,23 +101,11 @@ variableGroups:
   - title: "Aeron Configuration"
     variables:
       - install_aeron
-      - aeron_git_repo
-      - aeron_git_branch
-      - benchmarks_repo_url
-      - benchmarks_git_branch
-      - java_version
       - run_benchmarks
       - run_benchmarks_matrix_modes
       - run_benchmarks_cluster_matrix
-      - benchmark_echo_runs
-      - benchmark_echo_iterations
-      - benchmark_echo_warmup_iterations
-      - benchmark_echo_warmup_message_rate
-      - benchmark_message_length
-      - benchmark_message_rate
+      - pull_matrix_summary_for_terraform_output
       - benchmark_build_native_aeronmd
-      - aeron_echo_udp_interface_prefix_length
-      - aeron_echo_udp_named_interface
 
   - title: "Hidden Variables"
     variables:
@@ -127,6 +114,20 @@ variableGroups:
       - ssh_username
       - use_instance_principal
       - default_image_name
+      - benchmark_cluster_cpu_affinity
+      - aeron_git_repo
+      - aeron_git_branch
+      - benchmarks_repo_url
+      - benchmarks_git_branch
+      - java_version
+      - benchmark_echo_runs
+      - benchmark_echo_iterations
+      - benchmark_echo_warmup_iterations
+      - benchmark_echo_warmup_message_rate
+      - benchmark_message_length
+      - benchmark_message_rate
+      - aeron_echo_udp_interface_prefix_length
+      - aeron_echo_udp_named_interface
     visible: false
 
 variables:
@@ -407,7 +408,7 @@ variables:
     description: "Number of OCPUs for failover node (minimum 10)"
     minimum: 10
     maximum: 128
-    default: 10
+    default: 16
     visible:
       eq:
         - ${enable_failover_node}
@@ -462,15 +463,15 @@ variables:
     description: "Use an existing VCN instead of creating a new one"
     default: false
 
-  benchmark_cluster_placement_group:
-    type: string
-    title: "Benchmark cluster placement group"
-    description: "Places benchmark VMs in an OCI cluster placement group in the benchmark AD (tighter physical proximity). auto = create when you create a new VCN; skip when using an existing VCN. Use on/off to force."
-    enum:
-      - auto
-      - on
-      - off
-    default: auto
+  create_benchmark_cluster_placement_group:
+    type: boolean
+    title: "Create benchmark cluster placement group"
+    description: "Place benchmark VMs in an OCI cluster placement group in the benchmark AD (tighter physical proximity). Only available when creating a new VCN; cleared when you select Use Existing VCN."
+    default: true
+    visible:
+      eq:
+        - ${use_existing_vcn}
+        - false
 
   vcn_compartment_ocid:
     type: oci:identity:compartment:id
@@ -628,40 +629,24 @@ variables:
     title: "Aeron Git Repository"
     description: "Git repository URL for Aeron"
     default: "https://github.com/real-logic/aeron.git"
-    visible:
-      eq:
-        - ${install_aeron}
-        - true
 
   aeron_git_branch:
     type: string
     title: "Aeron Git Branch/Tag"
     description: "Branch or tag to checkout (leave empty for latest master)"
     default: ""
-    visible:
-      eq:
-        - ${install_aeron}
-        - true
 
   benchmarks_repo_url:
     type: string
     title: "Benchmarks Repository URL"
     description: "Official aeron-io/benchmarks repo for LoadTestRig, echo and cluster scenarios"
     default: "https://github.com/aeron-io/benchmarks"
-    visible:
-      eq:
-        - ${install_aeron}
-        - true
 
   benchmarks_git_branch:
     type: string
     title: "Benchmarks Repo Branch/Tag"
     description: "Branch or tag (leave empty for master)"
     default: ""
-    visible:
-      eq:
-        - ${install_aeron}
-        - true
 
   java_version:
     type: enum
@@ -671,10 +656,6 @@ variables:
       - "17"
       - "21"
     default: "17"
-    visible:
-      eq:
-        - ${install_aeron}
-        - true
 
   run_benchmarks:
     type: boolean
@@ -721,60 +702,36 @@ variables:
     title: "Echo benchmark RUNS"
     description: "Outer repetitions inside one remote-echo-benchmarks call (paths show run-1, run-2, …). Use 1 to skip repeat passes after a good first result."
     default: 1
-    visible:
-      eq:
-        - ${install_aeron}
-        - true
 
   benchmark_echo_iterations:
     type: number
     title: "Echo benchmark ITERATIONS"
     description: "LoadTestRig measurement iterations per RUN (not the same as RUNS or total message count)"
     default: 1
-    visible:
-      eq:
-        - ${install_aeron}
-        - true
 
   benchmark_echo_warmup_iterations:
     type: number
     title: "Echo warmup iterations"
     description: "Warmup iterations before measurement"
     default: 1
-    visible:
-      eq:
-        - ${install_aeron}
-        - true
 
   benchmark_echo_warmup_message_rate:
     type: string
     title: "Echo warmup message rate"
     description: "Throughput label during warmup (e.g. 25K), not a cap on messages"
     default: "25K"
-    visible:
-      eq:
-        - ${install_aeron}
-        - true
 
   benchmark_message_length:
     type: number
     title: "Echo message length (bytes)"
     description: "MESSAGE_LENGTH for echo LoadTestRig (e.g. 288)"
     default: 288
-    visible:
-      eq:
-        - ${install_aeron}
-        - true
 
   benchmark_message_rate:
     type: string
     title: "Echo message rate"
     description: "MESSAGE_RATE: numeric msg/s (e.g. 100001) or shorthand (101K). Target throughput, not an exact total message count."
     default: "100001"
-    visible:
-      eq:
-        - ${install_aeron}
-        - true
 
   benchmark_build_native_aeronmd:
     type: boolean
@@ -791,20 +748,12 @@ variables:
     title: "Echo UDP |interface= prefix length"
     description: "Prefix for Aeron echo channel |interface=LOCAL/prefix (Quickstart uses 24). Use 16 on typical OCI /16 subnets. Empty string omits |interface= (diagnostics). Ignored if named interface is set."
     default: "24"
-    visible:
-      eq:
-        - ${install_aeron}
-        - true
 
   aeron_echo_udp_named_interface:
     type: string
     title: "Echo UDP named interface (Aeron 1.50+)"
     description: "NIC name for |interface={name} from ip -br a (e.g. enp0s9 on many OCI VMs; do not assume ens3). Overrides prefix length when set."
     default: ""
-    visible:
-      eq:
-        - ${install_aeron}
-        - true
 
   ssh_username:
     type: string

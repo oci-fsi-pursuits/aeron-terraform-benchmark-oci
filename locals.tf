@@ -44,10 +44,7 @@ locals {
   public_subnet_id  = var.use_existing_vcn ? var.existing_public_subnet_id : oci_core_subnet.public_subnet[0].id
   private_subnet_id = var.use_existing_vcn ? var.existing_private_subnet_id : oci_core_subnet.private_subnet[0].id
 
-  enable_benchmark_cluster_placement_group = (
-    var.benchmark_cluster_placement_group == "on" ||
-    (var.benchmark_cluster_placement_group == "auto" && !var.use_existing_vcn)
-  )
+  enable_benchmark_cluster_placement_group = var.create_benchmark_cluster_placement_group && !var.use_existing_vcn
 
   # Flex shape detection
   is_controller_flex_shape = length(regexall(".*Flex$", var.controller_shape)) > 0
