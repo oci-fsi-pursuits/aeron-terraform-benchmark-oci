@@ -194,6 +194,16 @@ After apply, note the **controller public IP** and **benchmark private IPs** fro
 | `existing_private_subnet_id` | — | Private subnet for benchmark/failover. |
 | `private_deployment` | `false` | Controller without public IP (VPN/FastConnect). |
 
+### Cluster naming and OCI hostnames
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `cluster_name` | `aeron` | Prefix for resource display names and tags. |
+| `use_custom_name` | `false` | If false, `cluster_name` is suffixed with a random pet (e.g. `aeron-magnetic-bug`). If true, uses `cluster_name` exactly for display names. |
+| `instance_hostname_prefix` | `""` | Optional DNS-safe prefix for **VNIC hostname labels** (must be **unique per subnet**). Empty: derived from `cluster_name`; when `use_custom_name=true`, a **random pet** is appended automatically so two stacks can share subnets. Set explicitly when you need a stable prefix (e.g. `myproj-phx-b`). |
+
+Instance **display names** use `client` / `receiver` (not `benchmark-1` / `benchmark-2`). **VNIC hostnames** look like `{prefix}-controller`, `{prefix}-client`, `{prefix}-receiver`, `{prefix}-failover` (truncated to 63 characters).
+
 ### Aeron, benchmarks repo, and image
 
 | Variable | Default | Description |
@@ -387,8 +397,8 @@ Set `pull_matrix_summary_for_terraform_output=false` if apply must not depend on
 
 ### Two-node manual (Media Driver + Pong/Ping)
 
-1. On **receiver** (e.g. benchmark-2): start Media Driver and Pong (channel/endpoint so client can reach it).
-2. On **client** (e.g. benchmark-1): start Media Driver and Ping with the receiver’s channel (e.g. `aeron:udp?endpoint=<receiver-ip>:20121`).
+1. On **receiver** (second benchmark node, display name `*-receiver`): start Media Driver and Pong (channel/endpoint so client can reach it).
+2. On **client** (first benchmark node, `*-client`): start Media Driver and Ping with the receiver’s channel (e.g. `aeron:udp?endpoint=<receiver-ip>:20121`).
 3. Use the controller as jump host to SSH to both private IPs.
 
 ### Throughput (single-node)

@@ -32,6 +32,12 @@ variable "use_custom_name" {
   default     = false
 }
 
+variable "instance_hostname_prefix" {
+  type        = string
+  description = "Optional DNS-safe prefix for OCI VNIC hostname labels (unique per subnet). Use when sharing subnets across stacks with the same cluster_name. Empty: derived from cluster_name; if use_custom_name=true, random_pet is appended automatically. Example: myproj-phx-a."
+  default     = ""
+}
+
 # =============================================================================
 # Controller Node Configuration (Public Subnet - Orchestrator)
 # =============================================================================

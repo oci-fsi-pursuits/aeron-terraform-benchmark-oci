@@ -1,6 +1,41 @@
 locals {
   cluster_name = var.use_custom_name ? var.cluster_name : "${var.cluster_name}-${random_pet.name.id}"
 
+  # OCI VNIC hostname_label must be unique per subnet. Fixed labels (controller, benchmark-1) collide when
+  # multiple stacks share the same subnets. Prefix is DNS-sanitized; use_custom_name stacks append random_pet.
+  hostname_pet = random_pet.name.id
+  vnic_label_root_raw = length(trimspace(var.instance_hostname_prefix)) > 0 ? trimspace(var.instance_hostname_prefix) : (
+    var.use_custom_name ? "${var.cluster_name}-${local.hostname_pet}" : local.cluster_name
+  )
+  # DNS hostname label chars (no regexreplace: stays compatible with older Terraform CLI).
+  vnic_label_slug_low = lower(
+    replace(
+      replace(
+        replace(
+          replace(
+            replace(
+              replace(replace(local.vnic_label_root_raw, " ", "-"), "_", "-"),
+              ".", "-"
+            ),
+            "/", "-"
+          ),
+          "\\", "-"
+        ),
+        "@", "-"
+      ),
+      ":", "-"
+    )
+  )
+  vnic_label_slug_collapse = replace(
+    replace(
+      replace(replace(local.vnic_label_slug_low, "--", "-"), "--", "-"),
+      "--", "-"
+    ),
+    "--", "-"
+  )
+  vnic_hostname_prefix = substr(trim(local.vnic_label_slug_collapse, "-"), 0, 44)
+  vnic_hostname_prefix_final = length(local.vnic_hostname_prefix) > 0 ? local.vnic_hostname_prefix : substr(md5(local.cluster_name), 0, 8)
+
   vcn_compartment = var.vcn_compartment_ocid != "" ? var.vcn_compartment_ocid : var.compartment_ocid
 
   vcn_id = var.use_existing_vcn ? var.existing_vcn_id : oci_core_vcn.aeron_vcn[0].id

@@ -170,6 +170,12 @@ variables:
         - true
     required: true
 
+  instance_hostname_prefix:
+    type: string
+    title: "VNIC hostname prefix (optional)"
+    description: "DNS-safe prefix for instance hostname labels when subnets are shared across stacks. Leave empty to auto-derive (custom cluster names append a unique pet suffix)."
+    default: ""
+
   # ==========================================================================
   # Controller Node Configuration (Public Subnet - Orchestrator)
   # ==========================================================================

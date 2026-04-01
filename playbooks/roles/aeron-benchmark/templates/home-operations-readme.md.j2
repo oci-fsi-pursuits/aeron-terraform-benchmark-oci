@@ -16,21 +16,21 @@ This node is the **controller/orchestrator** for the Aeron benchmark stack.
 ## Cluster topology
 
 - `controller` (orchestrator): `{{ ansible_default_ipv4.address | default('unknown') }}`
-- `benchmark-1` (client): `{{ client_node_ip | default('not provided') }}` — hostname **`{{ aeron_benchmark_client_hostname }}`** (in `/etc/hosts` on all stack nodes)
-- `benchmark-2` (receiver): `{{ receiver_node_ip | default('not provided') }}` — **`{{ aeron_benchmark_receiver_hostname }}`**
+- **Client** (first benchmark node): `{{ client_node_ip | default('not provided') }}` — stable name **`{{ aeron_benchmark_client_hostname }}`** (in `/etc/hosts` on all stack nodes)
+- **Receiver** (second benchmark node): `{{ receiver_node_ip | default('not provided') }}` — **`{{ aeron_benchmark_receiver_hostname }}`**
 - `failover` (optional): `{{ failover_node_ip | default('not enabled') }}`{% if (failover_node_ip | default('') | trim) %} — **`{{ aeron_benchmark_failover_hostname }}`**{% endif %}
 
 Wrappers and `benchmark-config.env` use the **stable hostnames** above for SSH and Aeron UDP endpoints so you can refresh instances without editing channel strings (re-run apply so Ansible rewrites `/etc/hosts` and config).
 
 ## Node naming convention
 
-- Terraform display names follow:
+- Terraform **display names** follow:
   - `<cluster-name>-controller`
-  - `<cluster-name>-benchmark-1` (client)
-  - `<cluster-name>-benchmark-2` (receiver)
+  - `<cluster-name>-client` (echo/cluster client)
+  - `<cluster-name>-receiver` (echo/cluster receiver)
   - `<cluster-name>-failover` (optional)
-- Operational role names in scripts/docs:
-  - `controller`, `benchmark-1/client`, `benchmark-2/receiver`, `failover`
+- **OCI VNIC hostname labels** are unique per subnet: `{prefix}-controller`, `{prefix}-client`, `{prefix}-receiver`, `{prefix}-failover` (`prefix` includes your cluster name and, when using a fixed `cluster_name` across stacks, a unique suffix).
+- Operational names in `/etc/hosts` and benchmarks: **`{{ aeron_benchmark_client_hostname }}`**, **`{{ aeron_benchmark_receiver_hostname }}`**, controller, failover
 
 ## Passwordless SSH between nodes
 

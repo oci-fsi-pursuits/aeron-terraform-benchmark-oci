@@ -23,6 +23,8 @@ ssh_username   = "ubuntu"
 # -----------------------------------------------------------------------------
 use_custom_name = true
 cluster_name    = "aeron-local-test"
+# Optional: unique VNIC hostnames when several stacks share the same subnets (empty = cluster_name + random_pet when use_custom_name).
+# instance_hostname_prefix = "myproj-phx-a"
 
 # -----------------------------------------------------------------------------
 # Availability domains (examples for PHX — use your region’s AD names)

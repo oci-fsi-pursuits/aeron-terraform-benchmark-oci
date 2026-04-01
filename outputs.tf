@@ -3,6 +3,11 @@ output "cluster_name" {
   value       = local.cluster_name
 }
 
+output "vnic_hostname_prefix" {
+  description = "DNS prefix used for OCI VNIC hostname labels (controller/client/receiver/failover suffixes). Unique per stack when use_custom_name appends random_pet, or set instance_hostname_prefix explicitly."
+  value       = local.vnic_hostname_prefix_final
+}
+
 # =============================================================================
 # Controller Node Outputs
 # =============================================================================
@@ -48,12 +53,12 @@ output "benchmark_ssh_commands" {
 }
 
 output "client_node_ip" {
-  description = "Private IP of the client node (benchmark-1)"
+  description = "Private IP of the client node (first benchmark instance; display name *-client)"
   value       = oci_core_instance.benchmark[0].private_ip
 }
 
 output "receiver_node_ip" {
-  description = "Private IP of the receiver node (benchmark-2)"
+  description = "Private IP of the receiver node (second benchmark instance; display name *-receiver)"
   value       = var.benchmark_node_count >= 2 ? oci_core_instance.benchmark[1].private_ip : null
 }
 
@@ -132,7 +137,7 @@ output "node_summary" {
   description = "Summary of all deployed nodes"
   value = {
     controller = {
-      hostname   = "controller"
+      hostname   = substr("${local.vnic_hostname_prefix_final}-controller", 0, 63)
       public_ip  = var.private_deployment ? null : oci_core_instance.controller.public_ip
       private_ip = oci_core_instance.controller.private_ip
       ocpus      = var.controller_ocpus
@@ -140,14 +145,20 @@ output "node_summary" {
     }
     benchmark_nodes = [
       for idx, instance in oci_core_instance.benchmark : {
-        hostname   = "benchmark-${idx + 1}"
+        hostname = substr(
+          "${local.vnic_hostname_prefix_final}-${
+            idx == 0 ? "client" : idx == 1 ? "receiver" : format("node%d", idx + 1)
+          }",
+          0,
+          63
+        )
         private_ip = instance.private_ip
         ocpus      = var.benchmark_ocpus
-        role       = idx == 0 ? "client" : "receiver"
+        role       = idx == 0 ? "client" : idx == 1 ? "receiver" : "node-${idx + 1}"
       }
     ]
     failover = var.enable_failover_node ? {
-      hostname   = "failover"
+      hostname   = substr("${local.vnic_hostname_prefix_final}-failover", 0, 63)
       private_ip = oci_core_instance.failover[0].private_ip
       ocpus      = var.failover_ocpus
       role       = "failover"

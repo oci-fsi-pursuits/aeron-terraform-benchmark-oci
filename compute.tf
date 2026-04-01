@@ -38,7 +38,7 @@ resource "oci_core_instance" "controller" {
   create_vnic_details {
     subnet_id        = local.public_subnet_id
     assign_public_ip = !var.private_deployment
-    hostname_label   = "controller"
+    hostname_label   = substr("${local.vnic_hostname_prefix_final}-controller", 0, 63)
   }
 
   metadata = {
@@ -81,7 +81,7 @@ resource "oci_core_instance" "benchmark" {
   availability_domain = var.benchmark_ad
   compartment_id      = var.compartment_ocid
   shape               = var.benchmark_shape
-  display_name        = "${local.cluster_name}-benchmark-${count.index + 1}"
+  display_name        = "${local.cluster_name}-${count.index == 0 ? "client" : count.index == 1 ? "receiver" : format("node-%d", count.index + 1)}"
 
   dynamic "shape_config" {
     for_each = local.is_benchmark_flex_shape ? [1] : []
@@ -196,7 +196,7 @@ resource "oci_core_instance" "failover" {
   create_vnic_details {
     subnet_id        = local.private_subnet_id
     assign_public_ip = false
-    hostname_label   = "failover"
+    hostname_label   = substr("${local.vnic_hostname_prefix_final}-failover", 0, 63)
     nsg_ids          = [oci_core_network_security_group.aeron_benchmark.id]
   }
 
