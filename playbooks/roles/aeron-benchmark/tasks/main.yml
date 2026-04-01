@@ -1,4 +1,10 @@
 ---
+- name: Host firewall — UDP path for echo/cluster on benchmark nodes
+  ansible.builtin.import_tasks: host-firewall-udp.yml
+
+- name: Stable benchmark hostnames in /etc/hosts (controller + benchmark + failover nodes)
+  ansible.builtin.import_tasks: etc-hosts-benchmark.yml
+
 - name: Create benchmark and scripts directories
   file:
     path: "{{ item }}"
@@ -61,6 +67,8 @@
     - wrapper-cluster-unified.sh
     - aggregate-compare-results.sh
     - run-driver-matrix.sh
+    - echo-benchmark-debug.sh
+    - sanitize-benchmark-config-env.sh
   when: node_role | default('') == 'controller' and (benchmarks_dist_path | default('')) != ''
 
 - name: Ensure benchmarks scripts config directory exists (controller only)

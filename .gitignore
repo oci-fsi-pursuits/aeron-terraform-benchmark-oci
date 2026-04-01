@@ -39,6 +39,9 @@ id_rsa*
 *.zip
 *.tgz
 
+# Pulled driver-matrix summary for terraform output (may contain latencies / paths)
+.terraform-matrix-summary.json
+
 # Local env / generated benchmark config (may contain IPs or paths)
 **/benchmark-config.env
 .env

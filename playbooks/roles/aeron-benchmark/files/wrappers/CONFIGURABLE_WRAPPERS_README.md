@@ -16,7 +16,30 @@ Existing legacy wrappers remain in place for backward compatibility.
 
 ## Echo UDP channels (Quick Start Appendix A)
 
-`benchmark-config.env` and `wrapper-echo-unified.sh` use the same four **`aeron:udp?endpoint=…|interface=…/24`** lines as **Aeron Benchmarks Quick Start Appendix A** (`wrapper-echo-java-two-nodes.sh`). To use a different mask, export **`CLIENT_SOURCE_CHANNEL`**, **`CLIENT_DESTINATION_CHANNEL`**, **`SERVER_SOURCE_CHANNEL`**, and **`SERVER_DESTINATION_CHANNEL`** before sourcing config or running the wrapper.
+`benchmark-config.env` and `wrapper-echo-unified.sh` follow **Aeron Benchmarks** [remote echo](https://github.com/aeron-io/benchmarks) layout: four **`aeron:udp?endpoint=…|interface=…`** URIs.
+
+- **CIDR style** (Quick Start Appendix A): **`|interface=LOCAL_IP/PREFIX`** — default prefix **24**; use Terraform **`aeron_echo_udp_interface_prefix_length`** (e.g. **16** on /16 subnets), or **`AERON_ECHO_UDP_INTERFACE_PREFIX_LENGTH`** before sourcing.
+- **Named interface (Aeron 1.50+ driver):** **`|interface={ifname}`** — set Terraform **`aeron_echo_udp_named_interface`** to the NIC carrying the private IP (e.g. **`ens3`**), or **`export AERON_ECHO_UDP_NAMED_INTERFACE=ens3`** before the wrapper. The driver parses this as **`NamedInterface`** in [aeron-io/aeron](https://github.com/aeron-io/aeron) (`{name}` or `{name}:port`). When set, it **overrides** the prefix-length mode.
+- **Omit `interface`:** **`AERON_ECHO_UDP_INTERFACE_PREFIX_LENGTH=""`** and no named interface (diagnostics).
+
+Override fully with **`CLIENT_*_CHANNEL`** / **`SERVER_*_CHANNEL`** if client and server use different NIC names.
+
+## Debugging echo timeouts (on controller)
+
+From **`/opt/aeron/benchmarks-dist/scripts`** (after sourcing or with default config path):
+
+```bash
+./echo-benchmark-debug.sh ./config/benchmark-config.env
+```
+
+Prints local/remote interfaces, channel env, SSH checks, and runs **`SHOW_CONFIG_ONLY`** with a smoke profile.
+
+For a full shell trace of the **`remote-echo-benchmarks`** launch:
+
+```bash
+set -a && source ./config/benchmark-config.env && set +a
+WRAPPER_DEBUG=1 BENCH_PROFILE=smoke_288_101k ./wrapper-echo-unified.sh 2>&1 | tee /tmp/echo-trace.log
+```
 
 ## OpenOnload (`ONLOAD_COMMAND`)
 

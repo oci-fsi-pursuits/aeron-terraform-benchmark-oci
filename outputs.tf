@@ -154,3 +154,51 @@ output "node_summary" {
     } : null
   }
 }
+
+# =============================================================================
+# Driver matrix (smoke vs extended + optional pulled latencies)
+# =============================================================================
+output "benchmark_driver_matrix" {
+  description = "How the post-apply driver matrix is configured and how to interpret it vs full baselines."
+  value = {
+    profile_label = local.benchmark_driver_matrix_profile
+    explanation   = local.benchmark_driver_matrix_explanation
+    echo_configuration = {
+      benchmark_echo_runs                = var.benchmark_echo_runs
+      benchmark_echo_iterations          = var.benchmark_echo_iterations
+      benchmark_echo_warmup_iterations   = var.benchmark_echo_warmup_iterations
+      benchmark_message_length           = var.benchmark_message_length
+      benchmark_message_rate             = var.benchmark_message_rate
+      run_benchmarks_matrix_modes        = var.run_benchmarks_matrix_modes
+      run_benchmarks_cluster_matrix      = var.run_benchmarks_cluster_matrix && var.enable_failover_node
+    }
+    results_on_controller = "/home/${var.ssh_username}/benchmark-results"
+    pull_enabled          = var.pull_matrix_summary_for_terraform_output
+  }
+}
+
+output "benchmark_driver_matrix_summary" {
+  description = "Full JSON from the last matrix pull: echo_mode_status / cluster_mode_status (per-driver ok|failed), echo_modes / cluster_modes (latency medians per scenario), matrix_profile, and benchmark_echo_* counts. When pull_matrix_summary_for_terraform_output=true and SSH+python pull succeeded; otherwise null or stub with _pull_failed. Same apply ordering as benchmark_driver_matrix_smoke."
+  depends_on = [
+    null_resource.run_driver_matrix,
+    null_resource.benchmark_matrix_summary_pull,
+  ]
+  value = local.terraform_matrix_summary_json
+}
+
+output "benchmark_driver_matrix_smoke" {
+  description = "Convenience view of smoke/extended matrix results for terraform output: per-mode matrix status (java/c/java_vma/c_vma) and aggregated latency rows. Null keys when .terraform-matrix-summary.json is missing or pull failed (_pull_failed in full summary)."
+  depends_on = [
+    null_resource.run_driver_matrix,
+    null_resource.benchmark_matrix_summary_pull,
+  ]
+  value = local.terraform_matrix_summary_json == null ? null : {
+    pull_failed = try(local.terraform_matrix_summary_json["_pull_failed"], false)
+    errors      = try(local.terraform_matrix_summary_json["errors"], null)
+    matrix_profile = try(local.terraform_matrix_summary_json["matrix_profile"], null)
+    echo_mode_status    = try(local.terraform_matrix_summary_json["echo_mode_status"], [])
+    echo_latencies      = try(local.terraform_matrix_summary_json["echo_modes"], [])
+    cluster_mode_status = try(local.terraform_matrix_summary_json["cluster_mode_status"], [])
+    cluster_latencies   = try(local.terraform_matrix_summary_json["cluster_modes"], [])
+  }
+}

@@ -7,6 +7,10 @@ aeron_git_branch: ""
 benchmarks_repo_url: "https://github.com/aeron-io/benchmarks"
 benchmarks_git_branch: ""
 benchmarks_dist_path: "{{ aeron_dir }}/benchmarks-dist"
+# Echo channels: |interface=IP/prefix — use 16 on typical OCI /16 subnets; "" to omit |interface=.
+aeron_echo_udp_interface_prefix_length: "24"
+# Aeron 1.50+: |interface={ifname}; set to NIC from `ip -br a` (e.g. enp0s9 on OCI). Terraform -e overrides.
+aeron_echo_udp_named_interface: ""
 java_version: "17"
 hyperthreading: false
 force_rebuild: false
@@ -14,9 +18,22 @@ force_rebuild: false
 # ---------------------------------------------------------------------------
 # Benchmark profile (aligned with Aeron quickstart for reproducible results)
 # Fixed message size and rate for comparable baselines across runs
+# Terraform -e overrides: benchmark_message_length, benchmark_message_rate,
+# benchmark_echo_runs, benchmark_echo_iterations, benchmark_echo_warmup_*.
 # ---------------------------------------------------------------------------
 message_length: 288
-message_rate: "101K"
+message_rate: "100001"
+benchmark_echo_runs: 1
+benchmark_echo_iterations: 1
+benchmark_echo_warmup_iterations: 1
+benchmark_echo_warmup_message_rate: "25K"
+# Build Aeron C media driver (aeronmd) on controller and ship in benchmarks-dist; required for echo matrix c / c_vma.
+benchmark_build_native_aeronmd: true
+
+# OCPUs per benchmark node (Terraform passes benchmark_ocpus via -e for cluster/numactl ranges)
+benchmark_ocpus: 10
+# Cluster matrix: auto = probe numactl on receiver over SSH; static = pin from OCPU×threads only
+benchmark_cluster_cpu_affinity: auto
 
 # Socket buffer size in bytes (4MiB recommended for tail latency)
 socket_buf: 4194304

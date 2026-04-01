@@ -78,6 +78,112 @@
       dest: "{{ benchmarks_dist_path }}/scripts/run-java"
   when: node_role | default('') == 'controller'
 
+# deployTar does not ship aeronmd unless Gradle -Paeron.cdriver.package=... is set. Echo matrix modes "c" / "c_vma"
+# need aeronmd under benchmarks-dist/scripts/aeron (synced to benchmark nodes). Set benchmark_build_native_aeronmd=false
+# for java-only clusters to skip cmake.
+# Recent Aeron requires CMake >= 3.30; Ubuntu 24.04 ships 3.28 — use Kitware APT for a current cmake.
+- name: Install wget/gnupg for Kitware repo bootstrap (controller, Debian)
+  apt:
+    name:
+      - ca-certificates
+      - wget
+      - gnupg
+    state: present
+    update_cache: yes
+  when:
+    - node_role | default('') == 'controller'
+    - ansible_os_family == 'Debian'
+    - benchmark_build_native_aeronmd | default(true) | bool
+
+- name: Add Kitware APT repository for CMake 3.30+ (controller, Debian)
+  shell: |
+    set -euo pipefail
+    . /etc/os-release
+    rm -f /etc/apt/sources.list.d/kitware.list /usr/share/keyrings/kitware-archive-keyring.gpg
+    wget -qO- https://apt.kitware.com/keys/kitware-archive-latest.asc | gpg --batch --no-tty --dearmor -o /usr/share/keyrings/kitware-archive-keyring.gpg
+    printf '%s\n' "deb [signed-by=/usr/share/keyrings/kitware-archive-keyring.gpg] https://apt.kitware.com/ubuntu/ ${VERSION_CODENAME} main" > /etc/apt/sources.list.d/kitware.list
+    apt-get update -qq
+  args:
+    executable: /bin/bash
+  when:
+    - node_role | default('') == 'controller'
+    - ansible_os_family == 'Debian'
+    - benchmark_build_native_aeronmd | default(true) | bool
+
+- name: Install C media driver build dependencies (controller, Debian)
+  apt:
+    name:
+      - build-essential
+      - libbsd-dev
+      - uuid-dev
+      - zlib1g-dev
+      - libssl-dev
+      - pkg-config
+    state: present
+  when:
+    - node_role | default('') == 'controller'
+    - ansible_os_family == 'Debian'
+    - benchmark_build_native_aeronmd | default(true) | bool
+
+# Kitware repo is added above; Ubuntu's cmake stays at 3.28 with state=present — Aeron needs >= 3.30.
+- name: Install or upgrade CMake from Kitware (controller, Debian)
+  apt:
+    name: cmake
+    state: latest
+  when:
+    - node_role | default('') == 'controller'
+    - ansible_os_family == 'Debian'
+    - benchmark_build_native_aeronmd | default(true) | bool
+
+- name: Build native aeronmd and install into benchmarks-dist (controller, Debian)
+  shell: |
+    set -euo pipefail
+    export JAVA_HOME="/usr/lib/jvm/java-{{ java_version }}-openjdk-amd64"
+    export PATH="${JAVA_HOME}/bin:${PATH}"
+    AERON_ROOT="{{ aeron_dir }}/aeron-src"
+    BUILD_DIR="$AERON_ROOT/cppbuild/Release"
+    DEST_DIR="{{ benchmarks_dist_path }}/scripts/aeron"
+    DEST="$DEST_DIR/aeronmd"
+    mkdir -p "$BUILD_DIR"
+    cd "$BUILD_DIR"
+    if [ ! -x binaries/aeronmd ] || [ "${FORCE_REBUILD}" = "1" ]; then
+      cmake -DCMAKE_BUILD_TYPE=Release ../..
+      if ! cmake --build . --parallel "$(nproc)" --target aeronmd; then
+        echo "Note: target aeronmd missing or failed; building default targets" >&2
+        cmake --build . --parallel "$(nproc)"
+      fi
+    fi
+    AMD=""
+    if [ -x binaries/aeronmd ]; then
+      AMD="binaries/aeronmd"
+    else
+      AMD="$(find "$BUILD_DIR" -type f -name aeronmd -perm -111 2>/dev/null | head -1 || true)"
+    fi
+    if [ -z "${AMD}" ] || [ ! -x "${AMD}" ]; then
+      echo "aeronmd binary not found under ${BUILD_DIR}" >&2
+      exit 1
+    fi
+    mkdir -p "$DEST_DIR"
+    install -m 0755 "${AMD}" "$DEST"
+    shopt -s nullglob
+    for so in binaries/*.so; do
+      install -m 0755 "$so" "$DEST_DIR/"
+    done
+    # aeronmd dlopens libaeron_driver.so; CMake often places it under lib/ or lib64/, not binaries/
+    while IFS= read -r -d '' so; do
+      install -m 0755 "$so" "$DEST_DIR/$(basename "$so")"
+    done < <(find "$BUILD_DIR" -type f \( -name 'libaeron*.so' -o -name 'libaeron*.so.*' \) -print0 2>/dev/null)
+  args:
+    executable: /bin/bash
+  environment:
+    FORCE_REBUILD: "{{ '1' if force_rebuild | default(false) else '0' }}"
+  register: aeronmd_build
+  changed_when: aeronmd_build.rc == 0
+  when:
+    - node_role | default('') == 'controller'
+    - ansible_os_family == 'Debian'
+    - benchmark_build_native_aeronmd | default(true) | bool
+
 - name: Find benchmark launcher executables in extracted distribution
   find:
     paths: "{{ benchmarks_dist_path }}"
@@ -146,15 +252,98 @@
     - node_role | default('') == 'controller'
     - item.src != item.dest
 
+# Default 600×0.1s ≈ 60s per thread is too tight for JVM + Aeron cluster cold start on cloud VMs (c / c_vma).
+# Upstream runner has single -lt 600 / -lt 120 sites; replace in place (file uses \${count} escapes).
+- name: Lengthen thread-pin and process-poll loops in remote-benchmarks-runner
+  shell: |
+    set -e
+    R="{{ benchmarks_dist_path }}/scripts/remote-benchmarks-runner"
+    test -f "$R"
+    sed -i 's/-lt 600/-lt 3000/g' "$R"
+    # Native aeronmd (c / c_vma) can be slow to exec after numactl + onload/env; 240×0.5s still too tight on cloud VMs.
+    sed -i 's/-lt 120/-lt 480/g' "$R"
+  args:
+    executable: /bin/bash
+  when: node_role | default('') == 'controller'
+
+# procps pgrep -x '^aeronmd$' often misses the running binary (seen as Timeout on c_vma); pidof uses kernel comm.
+- name: Use pidof for native aeronmd await in remote-benchmarks-helper
+  ansible.builtin.shell: |
+    set -euo pipefail
+    H="{{ benchmarks_dist_path }}/scripts/aeron/remote-benchmarks-helper"
+    test -f "$H"
+    export BENCH_HELPER="$H"
+    python3 <<'PY'
+    import pathlib, os
+    p = pathlib.Path(os.environ["BENCH_HELPER"])
+    t = p.read_text()
+    subs = (
+        # Escaped $() as stored in some upstream helpers
+        ("\\$(pgrep -x '^aeronmd\\$')", "\\$(pidof -s aeronmd 2>/dev/null || pgrep -x aeronmd 2>/dev/null | head -n1)"),
+        ("\\$(pgrep -x '^aeronmd_dpdk\\$')", "\\$(pidof -s aeronmd_dpdk 2>/dev/null || pgrep -x aeronmd_dpdk 2>/dev/null | head -n1)"),
+        # Unescaped anchors (seen in timeout messages: pgrep -x ^aeronmd)
+        ("$(pgrep -x ^aeronmd)", "$(pidof -s aeronmd 2>/dev/null || pgrep -x aeronmd 2>/dev/null | head -n1)"),
+        ("$(pgrep -x ^aeronmd_dpdk)", "$(pidof -s aeronmd_dpdk 2>/dev/null || pgrep -x aeronmd_dpdk 2>/dev/null | head -n1)"),
+        ("\\$(pgrep -x '^aeronmd$')", "\\$(pidof -s aeronmd 2>/dev/null || pgrep -x aeronmd 2>/dev/null | head -n1)"),
+        ("\\$(pgrep -x '^aeronmd_dpdk$')", "\\$(pidof -s aeronmd_dpdk 2>/dev/null || pgrep -x aeronmd_dpdk 2>/dev/null | head -n1)"),
+    )
+    orig = t
+    for old, new in subs:
+        t = t.replace(old, new)
+    if t == orig:
+        raise SystemExit("remote-benchmarks-helper: expected pgrep aeronmd snippet not found (upstream layout changed?)")
+    p.write_text(t)
+    PY
+  args:
+    executable: /bin/bash
+  when: node_role | default('') == 'controller'
+
+# /dev/shm is sticky: root-owned mmap files under /dev/shm/aeron make ubuntu `rm` and MediaDriver recreate fail (EPERM).
+# Wrappers export AERON_DIR=/home/<ssh_user>/aeron-benchmark-shm so benchmark.properties matches. Align cleanup with that path.
+- name: Use sudo + AERON_DIR for media driver directory cleanup in remote-benchmarks-helper
+  shell: |
+    set -e
+    H="{{ benchmarks_dist_path }}/scripts/aeron/remote-benchmarks-helper"
+    test -f "$H"
+    if grep -Fq 'sudo rm -rf "${AERON_DIR:-/dev/shm/aeron}"' "$H"; then
+      echo "remote-benchmarks-helper: AERON_DIR rm patch already applied"
+      exit 0
+    fi
+    if ! grep -Fq 'rm -rf /dev/shm/aeron;' "$H"; then
+      echo "remote-benchmarks-helper: expected 'rm -rf /dev/shm/aeron;' not found (upstream changed?)" >&2
+      exit 1
+    fi
+    sed -i 's|rm -rf /dev/shm/aeron;|sudo rm -rf "${AERON_DIR:-/dev/shm/aeron}";|' "$H"
+  args:
+    executable: /bin/bash
+  when: node_role | default('') == 'controller'
+
+# Upstream starts cluster nodes as ( script & ) > log — the inner & exits the subshell immediately and job
+# control can tear down the boot sequence before MediaDriver/ClusterNode threads appear. Background the whole
+# subshell instead: ( script ) > log 2>&1 & exit
+- name: Fix cluster/backup SSH start in remote-cluster-benchmarks (subshell + background)
+  shell: |
+    set -e
+    R="{{ benchmarks_dist_path }}/scripts/aeron/remote-cluster-benchmarks"
+    test -f "$R"
+    sed -i 's/) &) > \/tmp\/benchmarks-cluster-node-${n}.log 2>&1 && exit/) ) > \/tmp\/benchmarks-cluster-node-${n}.log 2>\&1 \& exit/g' "$R"
+    sed -i 's/) &) > \/tmp\/benchmarks-cluster-backup-node-${n}.log 2>&1 && exit/) ) > \/tmp\/benchmarks-cluster-backup-node-${n}.log 2>\&1 \& exit/g' "$R"
+  args:
+    executable: /bin/bash
+  when: node_role | default('') == 'controller'
+
 # Deploy benchmarks-dist to benchmark nodes so they can run echo/server side.
-# Requires benchmark_node_ips (comma-separated string, e.g. "10.0.1.2,10.0.1.3") and deploy_key on controller.
+# Also push to failover when present — remote-cluster-benchmarks runs backup node commands on that host.
 - name: Deploy benchmarks-dist to benchmark nodes
   shell: |
     set -e
     KEY="{{ aeron_dir }}/.ssh/deploy_key"
-    for ip in $(echo "{{ benchmark_node_ips | default('') }}" | tr ',' ' '); do
+    IPS="{{ benchmark_node_ips | default('') }}"
+    {% if failover_node_ip is defined and (failover_node_ip | default('') | trim | length > 0) %}
+    IPS="${IPS},{{ failover_node_ip | trim }}"
+    {% endif %}
+    for ip in $(echo "$IPS" | tr ',' ' '); do
       [ -z "$ip" ] && continue
-      # Stream tar over SSH so benchmark nodes do not require rsync package.
       tar -C "{{ benchmarks_dist_path }}" -czf - . | ssh -i "$KEY" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "{{ ssh_username | default('ubuntu') }}@$ip" \
         "sudo rm -rf '{{ benchmarks_dist_path }}' && sudo mkdir -p '{{ benchmarks_dist_path }}' && sudo tar -xzf - -C '{{ benchmarks_dist_path }}' && sudo chown -R {{ ssh_username | default('ubuntu') }}:{{ ssh_username | default('ubuntu') }} '{{ benchmarks_dist_path }}'"
     done

@@ -1,0 +1,2 @@
+# Terraform playbooks archive is built on Windows; CRLF in *.sh breaks Ubuntu dash ("set: Illegal option -").
+*.sh text eol=lf

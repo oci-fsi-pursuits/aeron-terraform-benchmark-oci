@@ -16,9 +16,11 @@ This node is the **controller/orchestrator** for the Aeron benchmark stack.
 ## Cluster topology
 
 - `controller` (orchestrator): `{{ ansible_default_ipv4.address | default('unknown') }}`
-- `benchmark-1` (client): `{{ client_node_ip | default('not provided') }}`
-- `benchmark-2` (receiver): `{{ receiver_node_ip | default('not provided') }}`
-- `failover` (optional): `{{ failover_node_ip | default('not enabled') }}`
+- `benchmark-1` (client): `{{ client_node_ip | default('not provided') }}` — hostname **`{{ aeron_benchmark_client_hostname }}`** (in `/etc/hosts` on all stack nodes)
+- `benchmark-2` (receiver): `{{ receiver_node_ip | default('not provided') }}` — **`{{ aeron_benchmark_receiver_hostname }}`**
+- `failover` (optional): `{{ failover_node_ip | default('not enabled') }}`{% if (failover_node_ip | default('') | trim) %} — **`{{ aeron_benchmark_failover_hostname }}`**{% endif %}
+
+Wrappers and `benchmark-config.env` use the **stable hostnames** above for SSH and Aeron UDP endpoints so you can refresh instances without editing channel strings (re-run apply so Ansible rewrites `/etc/hosts` and config).
 
 ## Node naming convention
 
@@ -41,8 +43,8 @@ This stack configures passwordless SSH using the shared deployment key:
 Quick checks:
 
 ```bash
-ssh -o StrictHostKeyChecking=no {{ ssh_username | default('ubuntu') }}@{{ client_node_ip | default('127.0.0.1') }} 'hostname'
-ssh -o StrictHostKeyChecking=no {{ ssh_username | default('ubuntu') }}@{{ receiver_node_ip | default('127.0.0.1') }} 'hostname'
+ssh -o StrictHostKeyChecking=no {{ ssh_username | default('ubuntu') }}@{{ aeron_benchmark_client_hostname }} 'hostname'
+ssh -o StrictHostKeyChecking=no {{ ssh_username | default('ubuntu') }}@{{ aeron_benchmark_receiver_hostname }} 'hostname'
 ```
 
 ## Logs and results

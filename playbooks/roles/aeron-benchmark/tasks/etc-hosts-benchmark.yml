@@ -1,0 +1,13 @@
+---
+# Stable names for echo/cluster SSH and Aeron UDP endpoints (resolved via /etc/hosts on every node).
+- name: Add Aeron benchmark node names to /etc/hosts
+  ansible.builtin.blockinfile:
+    path: /etc/hosts
+    block: "{{ lookup('template', 'aeron-benchmark-hosts.snippet.j2') | trim }}"
+    marker: "# {mark} ANSIBLE MANAGED AERON BENCHMARK HOSTS"
+    insertafter: EOF
+  when:
+    - aeron_benchmark_manage_etc_hosts | bool
+    - (client_node_ip | default('') | trim | length) > 0
+    - (receiver_node_ip | default('') | trim | length) > 0
+  become: true

@@ -52,9 +52,9 @@ failover_memory_gb = 64
 # -----------------------------------------------------------------------------
 # Networking
 # -----------------------------------------------------------------------------
-use_sriov_networking = false
-hyperthreading       = false
-private_deployment   = false
+hyperthreading                 = false
+benchmark_cluster_cpu_affinity = "auto" # or "static" (OCPU×threads only, no SSH probe)
+private_deployment             = false
 
 # Option A: existing VCN/subnets
 use_existing_vcn           = true
@@ -75,3 +75,20 @@ install_aeron     = true
 
 run_benchmarks                = false
 run_benchmarks_matrix_modes   = "java"
+
+# Default echo tuning (1/1/1) is a smoke-style matrix — fast gate, not CHECKLIST.md baselines. See `terraform output benchmark_driver_matrix`.
+# After apply, median latencies appear in `terraform output benchmark_driver_matrix_summary` if OpenSSH + python can reach the controller (toggle off in CI):
+# pull_matrix_summary_for_terraform_output = false
+
+# Defaults are already minimal: RUNS=1, ITERATIONS=1, warmup=1, rate=100001. For more stable HDR stats, raise e.g.:
+# benchmark_echo_iterations        = 30
+# benchmark_echo_warmup_iterations = 10
+# benchmark_message_rate           = "101K"
+
+# Echo LoadTestRig: |interface=IP/prefix — use "16" if benchmark nodes are on a /16 subnet (common on OCI).
+# aeron_echo_udp_interface_prefix_length = "16"
+# Or Aeron 1.50+ named NIC (overrides prefix): use `ip -br a` on a benchmark node, e.g. enp0s9
+# aeron_echo_udp_named_interface = "enp0s9"
+
+# Host iptables ACCEPT for benchmark UDP (default true); persist across reboot:
+# aeron_benchmark_host_firewall_persistent = true

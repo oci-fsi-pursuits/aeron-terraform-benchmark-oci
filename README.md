@@ -278,6 +278,80 @@ cd /opt/aeron/benchmarks-dist/scripts
 
 Results (HDR archives) are produced under the scripts directory (e.g. `aeron-echo-*-client.tar.gz`). Use `aggregate-compare-results.sh` in the same directory to aggregate and compare runs. See [aeron-io/benchmarks](https://github.com/aeron-io/benchmarks) and the quickstart for full options (driver modes, cluster, aggregation).
 
+### Full baseline benchmarks (echo and cluster, all driver modes)
+
+The post-apply **driver matrix** uses **smoke-style** Terraform defaults (`benchmark_echo_runs` / `iterations` / `warmup` often `1`) to finish quickly. For **publication-style** numbers (closer to the [Aeron AWS performance testing guide](https://aeron.io) and `BENCH_PROFILE=latency_288_101k`), run **manually from the controller** with enough **RUNS**, **ITERATIONS**, and **WARMUP** so HDR histograms stabilize.
+
+**Prerequisites (controller):**
+
+```bash
+cd /opt/aeron/benchmarks-dist/scripts
+set -a && source /opt/aeron/scripts/config/benchmark-config.env && set +a
+```
+
+**Shared parameters** (288 B @ ~101 K msg/s, 5 outer runs, 30 measurement iterations, 10 warmup — adjust as needed):
+
+```bash
+export RUNS=5
+export ITERATIONS=30
+export WARMUP_ITERATIONS=10
+export WARMUP_MESSAGE_RATE=25K
+export MESSAGE_LENGTH=288
+export MESSAGE_RATE=101K
+export BENCH_PROFILE=custom
+```
+
+**Echo** (`wrapper-echo-unified.sh`): same workload as [aeron-io/benchmarks](https://github.com/aeron-io/benchmarks) `remote-echo-benchmarks` (LoadTestRig ↔ EchoNode). Run each pair **client and server same mode**:
+
+```bash
+# Java / Java
+CLIENT_MODE=java SERVER_MODE=java CONTEXT=full-echo-java-java ./wrapper-echo-unified.sh
+
+# Java + OpenOnload-style prefix (maps to java-onload upstream; on OCI without Solarflare, ONLOAD_COMMAND=env is typical)
+CLIENT_MODE=java_vma SERVER_MODE=java_vma CONTEXT=full-echo-java_vma-java_vma ./wrapper-echo-unified.sh
+
+# C media driver / aeronmd
+CLIENT_MODE=c SERVER_MODE=c CONTEXT=full-echo-c-c ./wrapper-echo-unified.sh
+
+CLIENT_MODE=c_vma SERVER_MODE=c_vma CONTEXT=full-echo-c_vma-c_vma ./wrapper-echo-unified.sh
+```
+
+**Cluster** (`wrapper-cluster-unified.sh`): requires **failover** topology in config (third node). Uses `CLUSTER_CLIENT_MODE` / `CLUSTER_SERVER_MODE` (same naming as echo: `java`, `java_vma`, `c`, `c_vma`). Config path is required as the first argument:
+
+```bash
+export CLUSTER_CONTEXT=full-cluster-java-java
+export CLUSTER_CLIENT_MODE=java
+export CLUSTER_SERVER_MODE=java
+bash ./wrapper-cluster-unified.sh ./config/benchmark-config.env
+```
+
+```bash
+export CLUSTER_CONTEXT=full-cluster-java_vma-java_vma
+export CLUSTER_CLIENT_MODE=java_vma
+export CLUSTER_SERVER_MODE=java_vma
+bash ./wrapper-cluster-unified.sh ./config/benchmark-config.env
+```
+
+```bash
+export CLUSTER_CONTEXT=full-cluster-c-c
+export CLUSTER_CLIENT_MODE=c
+export CLUSTER_SERVER_MODE=c
+bash ./wrapper-cluster-unified.sh ./config/benchmark-config.env
+```
+
+```bash
+export CLUSTER_CONTEXT=full-cluster-c_vma-c_vma
+export CLUSTER_CLIENT_MODE=c_vma
+export CLUSTER_SERVER_MODE=c_vma
+bash ./wrapper-cluster-unified.sh ./config/benchmark-config.env
+```
+
+**Notes:**
+
+- **VMA modes** (`java_vma`, `c_vma`): the stack sets `ONLOAD_COMMAND=env` by default so benchmarks run without Solarflare OpenOnload; for real onload, set `ONLOAD_COMMAND='onload --profile=latency'` in `benchmark-config.env` or export it before the wrapper.
+- **Echo vs samples Ping/Pong**: these wrappers drive **LoadTestRig / EchoNode**, not `/opt/aeron/bin/ping.sh` — that is a separate single-node sanity path.
+- **Terraform**: raise `benchmark_echo_*` and `message_*` in tfvars if you want the **automated matrix** itself to use these counts (apply time will increase).
+
 ### Automated matrix run (Run Benchmarks in stack)
 
 When **Run Benchmarks After Deployment** (`run_benchmarks=true`) is enabled, the stack runs matrix benchmarks automatically **after all node provisioning and configuration is complete**:
@@ -299,11 +373,17 @@ Results and progress are published in controller home:
   aeron-cluster-*.tar.gz                   # when failover enabled
 ```
 
-`driver-matrix-*-summary.csv` includes aggregated latency metrics per scenario:
-- `median_p50_us`
-- `median_p99_us`
-- `median_p999_us`
-- `median_max_us`
+`driver-matrix-*-summary.csv` includes:
+
+1. A **matrix status** table (`mode,status,notes`) — one row per driver mode (`java`, `java_vma`, …).
+2. **Aggregated latency CSV** (`archive,scenario,valid_runs,median_p50_us,…`) from `aggregate-compare-results.sh`.
+
+**Terraform outputs** (after apply, when `pull_matrix_summary_for_terraform_output=true` and the machine running Terraform can SSH to the controller with Python available):
+
+- `terraform output benchmark_driver_matrix_smoke` — shortcut object: `echo_mode_status` / `cluster_mode_status`, `echo_latencies` / `cluster_latencies`, `pull_failed`, `matrix_profile`.
+- `terraform output benchmark_driver_matrix_summary` — full pulled JSON (same file as `.terraform-matrix-summary.json` on the Terraform host).
+
+Set `pull_matrix_summary_for_terraform_output=false` if apply must not depend on local SSH (e.g. some CI). On **Windows**, the pull uses `working_dir` + `python scripts/matrix_summary_pull.py` so paths stay valid.
 
 ### Two-node manual (Media Driver + Pong/Ping)
 
@@ -349,8 +429,9 @@ For reproducible baselines, keep the same profile (288B @ 101K), same socket buf
 ## Security and Cleanup
 
 - Aeron UDP (40000–40100) is allowed only within the VCN on **Terraform-managed** subnets.
-- **aeron-io/benchmarks** echo/cluster defaults use UDP **~12000–14000** (e.g. 13000/13100). The stack attaches an **NSG** with that range to benchmark/failover VNICs. With an **existing VCN**, the **private subnet security list must also allow** the same UDP range (or all traffic) from the VCN CIDR—OCI requires both NSG and security list to permit the flow. Override the source CIDR with Terraform variable `aeron_benchmark_udp_ingress_cidr` if needed.
-- Echo UDP channel URIs follow **Aeron Benchmarks Quick Start Appendix A** (literal **`|interface=<local-ip>/24`** on each side). They are emitted in `benchmark-config.env` from Terraform private IPs. If your subnet is not /24, override **`CLIENT_*_CHANNEL`** / **`SERVER_*_CHANNEL`** before running the wrapper.
+- **aeron-io/benchmarks** echo uses UDP **~12000–14000** (e.g. 13000/13100); **cluster** uses **~20000+** and **dynamic response ports**. The stack attaches an **NSG** with matching **ingress and egress** UDP **12000–65535** to/from the effective benchmark CIDR on benchmark/failover VNICs (NSGs are **stateless**—egress is required for cluster responses to the client). With an **existing VCN**, the **private subnet security list must also allow** that UDP range (or all traffic) from the VCN CIDR—OCI requires both NSG and security list to permit the flow. Override the source CIDR with Terraform variable `aeron_benchmark_udp_ingress_cidr` if needed.
+- **Host firewall:** on benchmark nodes (client/receiver), Ansible inserts an **iptables** ACCEPT for UDP **12000–65535** from the same effective CIDR when **`aeron_benchmark_configure_host_firewall`** is **true** (default). Set **`aeron_benchmark_host_firewall_persistent`** to save rules across reboot. See [ECHO-2HOST-ANSIBLE-HANDOFF.md](docs/ECHO-2HOST-ANSIBLE-HANDOFF.md).
+- Echo UDP channels follow **[aeron-io/benchmarks](https://github.com/aeron-io/benchmarks)** remote echo conventions. Either **`|interface=<local-ip>/PREFIX`** (default prefix **24**, Terraform **`aeron_echo_udp_interface_prefix_length`**) or **Aeron 1.50+** **`|interface={ifname}`** via **`aeron_echo_udp_named_interface`** (use **`ip -br a`** on the node, e.g. **`enp0s9`** on many OCI shapes). Named mode overrides prefix mode. **`SHOW_CONFIG_ONLY=1 ./wrapper-echo-unified.sh`** (after sourcing config) prints URIs.
 - Restrict SSH (e.g. security list or VPN) as needed.
 - Use `private_deployment = true` if the controller should have no public IP.
 
@@ -371,6 +452,7 @@ For reproducible baselines, keep the same profile (288B @ 101K), same socket buf
 - [Aeron GitHub](https://github.com/real-logic/aeron)
 - [aeron-io/benchmarks](https://github.com/aeron-io/benchmarks) — official latency benchmarks, wrappers, aggregation
 - [Quickstart vs stack alignment](docs/INCONSISTENCIES-QUICKSTART-VS-STACK.md) — source of truth and inconsistency list
+- [Echo benchmark SSH debug playbook](docs/ECHO-BENCHMARK-SSH-DEBUG.md) — commands to run on the controller and how they map to Ansible/Terraform fixes
 - [OCI Resource Manager](https://docs.oracle.com/en-us/iaas/Content/ResourceManager/home.htm)
 - [OCI HPC Quick Start](https://github.com/oracle-quickstart/oci-hpc)
 

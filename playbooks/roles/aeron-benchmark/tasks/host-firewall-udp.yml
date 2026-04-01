@@ -1,0 +1,176 @@
+---
+# Host INPUT often rejects benchmark UDP despite OCI NSG/SL (docs/ECHO-2HOST-ANSIBLE-HANDOFF.md).
+- name: Aeron benchmark host firewall — allow UDP 12000-65535 from VCN CIDR (echo + cluster + ephemeral)
+  when:
+    - (node_role | default('')) in ['client', 'receiver']
+    - aeron_benchmark_configure_host_firewall | default(true) | bool
+    - (aeron_benchmark_host_udp_source_cidr | default('') | trim | length) > 0
+  block:
+    - name: Install iptables-persistent (optional, for reboot persistence)
+      ansible.builtin.apt:
+        name: iptables-persistent
+        state: present
+      environment:
+        DEBIAN_FRONTEND: noninteractive
+      when: aeron_benchmark_host_firewall_persistent | default(false) | bool
+
+    - name: Check if Aeron benchmark UDP rule already exists
+      ansible.builtin.command:
+        argv:
+          - iptables
+          - -C
+          - INPUT
+          - -p
+          - udp
+          - -m
+          - multiport
+          - --dports
+          - "12000:65535"
+          - -s
+          - "{{ aeron_benchmark_host_udp_source_cidr | trim }}"
+          - -j
+          - ACCEPT
+          - -m
+          - comment
+          - --comment
+          - aeron-benchmark-udp
+      register: aeron_udp_rule_check
+      failed_when: false
+      changed_when: false
+
+    - name: Insert iptables ACCEPT for benchmark UDP at head of INPUT
+      ansible.builtin.command:
+        argv:
+          - iptables
+          - -I
+          - INPUT
+          - "1"
+          - -p
+          - udp
+          - -m
+          - multiport
+          - --dports
+          - "12000:65535"
+          - -s
+          - "{{ aeron_benchmark_host_udp_source_cidr | trim }}"
+          - -j
+          - ACCEPT
+          - -m
+          - comment
+          - --comment
+          - aeron-benchmark-udp
+      register: aeron_iptables_udp
+      when: aeron_udp_rule_check.rc != 0
+      changed_when: true
+
+    # Explicit peer allow (docs/CHECKLIST.md): some images end INPUT with REJECT; VCN-wide rule may not match all paths.
+    - name: Peer INPUT — UDP from other benchmark node (client accepts receiver)
+      when:
+        - (node_role | default('')) == 'client'
+        - (receiver_node_ip | default('') | trim | length) > 0
+      block:
+        - name: Check if peer UDP rule exists (from receiver)
+          ansible.builtin.command:
+            argv:
+              - iptables
+              - -C
+              - INPUT
+              - -p
+              - udp
+              - -m
+              - multiport
+              - --dports
+              - "12000:65535"
+              - -s
+              - "{{ receiver_node_ip | trim }}"
+              - -j
+              - ACCEPT
+              - -m
+              - comment
+              - --comment
+              - aeron-benchmark-udp-peer
+          register: aeron_udp_peer_from_receiver_check
+          failed_when: false
+          changed_when: false
+
+        - name: Insert iptables ACCEPT for UDP from receiver peer at head of INPUT
+          ansible.builtin.command:
+            argv:
+              - iptables
+              - -I
+              - INPUT
+              - "1"
+              - -p
+              - udp
+              - -m
+              - multiport
+              - --dports
+              - "12000:65535"
+              - -s
+              - "{{ receiver_node_ip | trim }}"
+              - -j
+              - ACCEPT
+              - -m
+              - comment
+              - --comment
+              - aeron-benchmark-udp-peer
+          when: aeron_udp_peer_from_receiver_check.rc != 0
+          changed_when: true
+
+    - name: Peer INPUT — UDP from other benchmark node (receiver accepts client)
+      when:
+        - (node_role | default('')) == 'receiver'
+        - (client_node_ip | default('') | trim | length) > 0
+      block:
+        - name: Check if peer UDP rule exists (from client)
+          ansible.builtin.command:
+            argv:
+              - iptables
+              - -C
+              - INPUT
+              - -p
+              - udp
+              - -m
+              - multiport
+              - --dports
+              - "12000:65535"
+              - -s
+              - "{{ client_node_ip | trim }}"
+              - -j
+              - ACCEPT
+              - -m
+              - comment
+              - --comment
+              - aeron-benchmark-udp-peer
+          register: aeron_udp_peer_from_client_check
+          failed_when: false
+          changed_when: false
+
+        - name: Insert iptables ACCEPT for UDP from client peer at head of INPUT
+          ansible.builtin.command:
+            argv:
+              - iptables
+              - -I
+              - INPUT
+              - "1"
+              - -p
+              - udp
+              - -m
+              - multiport
+              - --dports
+              - "12000:65535"
+              - -s
+              - "{{ client_node_ip | trim }}"
+              - -j
+              - ACCEPT
+              - -m
+              - comment
+              - --comment
+              - aeron-benchmark-udp-peer
+          when: aeron_udp_peer_from_client_check.rc != 0
+          changed_when: true
+
+    - name: Persist iptables (IPv4)
+      ansible.builtin.command: netfilter-persistent save
+      when: aeron_benchmark_host_firewall_persistent | default(false) | bool
+      changed_when: true

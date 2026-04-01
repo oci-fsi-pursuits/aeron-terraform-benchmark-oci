@@ -156,16 +156,21 @@ variable "failover_boot_volume_size_gb" {
 # =============================================================================
 # Performance Settings
 # =============================================================================
-variable "use_sriov_networking" {
-  type        = bool
-  description = "Use hardware-assisted (SR-IOV) networking for lower latency. Disable for paravirtualized networking (e.g. if shape/image do not support SR-IOV)."
-  default     = true
-}
-
 variable "hyperthreading" {
   type        = bool
   description = "Enable hyperthreading (SMT). Disabled by default for optimal Aeron performance."
   default     = false
+}
+
+variable "benchmark_cluster_cpu_affinity" {
+  type        = string
+  description = "Cluster matrix CPU pinning: auto = SSH to receiver and parse numactl node 0 (recommended). static = derive 0..(OCPU×(HT?2:1)-1) from stack only."
+  default     = "auto"
+
+  validation {
+    condition     = contains(["auto", "static"], var.benchmark_cluster_cpu_affinity)
+    error_message = "benchmark_cluster_cpu_affinity must be auto or static."
+  }
 }
 
 # =============================================================================
@@ -222,7 +227,33 @@ variable "private_subnet_cidr" {
 # When empty, uses VCN primary CIDR (existing VCN from data source, or vcn_cidr_block for new VCN).
 variable "aeron_benchmark_udp_ingress_cidr" {
   type        = string
-  description = "Source CIDR for UDP ingress to benchmark echo/cluster ports (aeron-io defaults ~12000–14000). Set explicitly if echo fails to connect with existing VCN/security lists."
+  description = "Source CIDR for UDP ingress to benchmark nodes (echo ~12k–14k, cluster ~20k–24k, ephemeral responses up to 65535 in managed NSG/iptables). Set explicitly if benchmarks fail with existing VCN/security lists."
+  default     = ""
+}
+
+variable "aeron_benchmark_configure_host_firewall" {
+  type        = bool
+  description = "On benchmark nodes (client/receiver), insert iptables ACCEPT for UDP 12000-65535 from the effective VCN CIDR (same as aeron_benchmark_udp_ingress_cidr when resolved). Fixes host-level INPUT reject despite OCI NSG/SL."
+  default     = true
+}
+
+variable "aeron_benchmark_host_firewall_persistent" {
+  type        = bool
+  description = "When true, install iptables-persistent and run netfilter-persistent save after adding the benchmark UDP rule."
+  default     = false
+}
+
+# Echo LoadTestRig channel URIs use |interface=local_ip/prefix. Quickstart uses /24; many OCI subnets are /16.
+variable "aeron_echo_udp_interface_prefix_length" {
+  type        = string
+  description = "Prefix length for Aeron echo UDP |interface=LOCAL/prefix (default 24). Set \"16\" if benchmark nodes sit on a /16 subnet. Set \"\" to omit |interface= (diagnostics only). Ignored if aeron_echo_udp_named_interface is set."
+  default     = "24"
+}
+
+# Aeron 1.50+ driver: interface={ifname} binds via NetworkInterface.getByName — see aeron-io/aeron NamedInterface.java
+variable "aeron_echo_udp_named_interface" {
+  type        = string
+  description = "Optional NIC name for echo |interface={name} (Aeron 1.50+). Use ip -br a on a benchmark node (e.g. enp0s9 on many OCI shapes; do not assume ens3). Overrides CIDR-style interface when non-empty."
   default     = ""
 }
 
@@ -317,6 +348,60 @@ variable "run_benchmarks_matrix_modes" {
   type        = string
   description = "Driver matrix modes for automated benchmark run (comma-separated): java,java_vma,c,c_vma"
   default     = "java,java_vma,c,c_vma"
+}
+
+variable "run_benchmarks_cluster_matrix" {
+  type        = bool
+  description = "When enable_failover_node is true, also run the cluster driver matrix after the echo matrix (strict; failures fail apply). Disable for echo-only validation."
+  default     = true
+}
+
+variable "pull_matrix_summary_for_terraform_output" {
+  type        = bool
+  description = "After run_driver_matrix, SSH from the Terraform machine to the controller and write .terraform-matrix-summary.json so outputs include median latencies. Requires OpenSSH + python3 on the machine running terraform. Set false if apply should not depend on local SSH (e.g. some CI)."
+  default     = true
+}
+
+variable "benchmark_echo_runs" {
+  type        = number
+  description = "Echo benchmark RUNS (outer repetitions inside one remote-echo-benchmarks invocation; result paths often show run-1, run-2, …). Default 1 is smoke-style (fast matrix). Use 3+ for a bit more sampling; use 5+ with higher iterations for CHECKLIST-style baselines."
+  default     = 1
+}
+
+variable "benchmark_echo_iterations" {
+  type        = number
+  description = "Echo benchmark ITERATIONS (LoadTestRig measurement iterations per run; not the same as RUNS or total message count). Default 1 is smoke-style."
+  default     = 1
+}
+
+variable "benchmark_echo_warmup_iterations" {
+  type        = number
+  description = "Echo benchmark WARMUP_ITERATIONS before measurement. Default 1 is smoke-style."
+  default     = 1
+}
+
+variable "benchmark_echo_warmup_message_rate" {
+  type        = string
+  description = "Warmup message rate label (e.g. 25K) — throughput during warmup, not a message cap."
+  default     = "25K"
+}
+
+variable "benchmark_message_length" {
+  type        = number
+  description = "Echo MESSAGE_LENGTH in bytes (e.g. 288)."
+  default     = 288
+}
+
+variable "benchmark_message_rate" {
+  type        = string
+  description = "Echo MESSAGE_RATE (numeric msg/s e.g. 100001, or shorthand like 101K). Target throughput for LoadTestRig, not an exact total message count."
+  default     = "100001"
+}
+
+variable "benchmark_build_native_aeronmd" {
+  type        = bool
+  description = "Build Aeron C media driver (aeronmd) on the controller and include it in benchmarks-dist (required for echo matrix modes c and c_vma)."
+  default     = true
 }
 
 # =============================================================================

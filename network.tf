@@ -103,13 +103,13 @@ resource "oci_core_security_list" "public_security_list" {
     }
   }
 
-  # aeron-io/benchmarks echo defaults (~13000/13100)
+  # aeron-io/benchmarks echo (~13000/13100) + cluster (~20000+) + dynamic UDP response ports
   ingress_security_rules {
     protocol = "17"
     source   = var.vcn_cidr_block
     udp_options {
       min = 12000
-      max = 14000
+      max = 65535
     }
   }
 

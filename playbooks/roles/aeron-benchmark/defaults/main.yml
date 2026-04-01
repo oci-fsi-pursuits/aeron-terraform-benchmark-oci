@@ -1,0 +1,13 @@
+---
+# Overridden by Terraform ansible-playbook -e on provisioned nodes.
+# Stable names written to /etc/hosts (see tasks/etc-hosts-benchmark.yml); wrappers and channel URIs use these.
+aeron_benchmark_manage_etc_hosts: true
+aeron_benchmark_client_hostname: aeron-benchmark-client
+aeron_benchmark_receiver_hostname: aeron-benchmark-receiver
+aeron_benchmark_failover_hostname: aeron-benchmark-failover
+
+aeron_benchmark_configure_host_firewall: true
+# Effective VCN (or override) CIDR — must be non-empty on benchmark nodes for iptables rule.
+aeron_benchmark_host_udp_source_cidr: ""
+# When true, install iptables-persistent and run netfilter-persistent save after inserting rule.
+aeron_benchmark_host_firewall_persistent: false

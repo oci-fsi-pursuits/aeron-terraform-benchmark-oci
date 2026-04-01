@@ -28,11 +28,11 @@ data "oci_core_images" "ubuntu_minimal" {
 
 # Alternative marketplace images
 data "oci_core_images" "marketplace_image" {
-  compartment_id           = var.compartment_ocid
-  operating_system         = "Canonical Ubuntu"
-  shape                    = var.benchmark_shape
-  sort_by                  = "TIMECREATED"
-  sort_order               = "DESC"
+  compartment_id   = var.compartment_ocid
+  operating_system = "Canonical Ubuntu"
+  shape            = var.benchmark_shape
+  sort_by          = "TIMECREATED"
+  sort_order       = "DESC"
 
   filter {
     name   = "display_name"
@@ -47,7 +47,7 @@ data "oci_core_vcns" "existing_vcns" {
   state          = "AVAILABLE"
 }
 
-# Primary CIDR for NSG rules (aeron-io/benchmarks echo uses UDP ~13000/13100; must match your VCN).
+# Primary CIDR for NSG rules (aeron-io/benchmarks echo + cluster UDP; must match your VCN).
 data "oci_core_vcn" "existing" {
   count  = var.use_existing_vcn ? 1 : 0
   vcn_id = var.existing_vcn_id

@@ -1,0 +1,5 @@
+{{ client_node_ip }} {{ aeron_benchmark_client_hostname }}
+{{ receiver_node_ip }} {{ aeron_benchmark_receiver_hostname }}
+{% if (failover_node_ip | default('') | trim) %}
+{{ failover_node_ip }} {{ aeron_benchmark_failover_hostname }}
+{% endif %}

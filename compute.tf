@@ -32,7 +32,7 @@ resource "oci_core_instance" "controller" {
   }
 
   launch_options {
-    network_type = var.use_sriov_networking ? "VFIO" : "PARAVIRTUALIZED"
+    network_type = "VFIO"
   }
 
   create_vnic_details {
@@ -43,7 +43,7 @@ resource "oci_core_instance" "controller" {
 
   metadata = {
     ssh_authorized_keys = "${var.ssh_public_key}\n${tls_private_key.ssh.public_key_openssh}"
-    user_data           = base64encode(templatefile("${path.module}/scripts/cloud-init.yaml", {
+    user_data = base64encode(templatefile("${path.module}/scripts/cloud-init.yaml", {
       ssh_username   = var.ssh_username
       hyperthreading = true
       install_aeron  = var.install_aeron
@@ -110,7 +110,7 @@ resource "oci_core_instance" "benchmark" {
   }
 
   launch_options {
-    network_type = var.use_sriov_networking ? "VFIO" : "PARAVIRTUALIZED"
+    network_type = "VFIO"
   }
 
   create_vnic_details {
@@ -122,7 +122,7 @@ resource "oci_core_instance" "benchmark" {
 
   metadata = {
     ssh_authorized_keys = "${var.ssh_public_key}\n${tls_private_key.ssh.public_key_openssh}"
-    user_data           = base64encode(templatefile("${path.module}/scripts/cloud-init.yaml", {
+    user_data = base64encode(templatefile("${path.module}/scripts/cloud-init.yaml", {
       ssh_username   = var.ssh_username
       hyperthreading = var.hyperthreading
       install_aeron  = var.install_aeron
@@ -190,7 +190,7 @@ resource "oci_core_instance" "failover" {
   }
 
   launch_options {
-    network_type = var.use_sriov_networking ? "VFIO" : "PARAVIRTUALIZED"
+    network_type = "VFIO"
   }
 
   create_vnic_details {
@@ -202,7 +202,7 @@ resource "oci_core_instance" "failover" {
 
   metadata = {
     ssh_authorized_keys = "${var.ssh_public_key}\n${tls_private_key.ssh.public_key_openssh}"
-    user_data           = base64encode(templatefile("${path.module}/scripts/cloud-init.yaml", {
+    user_data = base64encode(templatefile("${path.module}/scripts/cloud-init.yaml", {
       ssh_username   = var.ssh_username
       hyperthreading = var.hyperthreading
       install_aeron  = var.install_aeron
@@ -239,9 +239,10 @@ resource "null_resource" "controller_provisioner" {
   depends_on = [oci_core_instance.controller, oci_core_instance.benchmark]
 
   triggers = {
-    instance_id      = oci_core_instance.controller.id
-    playbooks_bundle = data.archive_file.playbooks.id
-    provisioner_rev  = "2026-03-25-controller-ssh-readme"
+    instance_id              = oci_core_instance.controller.id
+    playbooks_bundle         = data.archive_file.playbooks.id
+    provisioner_rev          = "2026-03-27-benchmark-env-from-tf"
+    benchmark_ansible_resync = local.benchmark_ansible_resync
   }
 
   connection {
@@ -316,11 +317,11 @@ resource "null_resource" "controller_provisioner" {
       "set -e",
       "echo 'Running Ansible (Aeron, benchmarks repo, and wrapper setup)...'",
       "echo \"$(date -u +%Y-%m-%dT%H:%M:%SZ) controller-provisioner: ansible-start\" | tee -a /home/${var.ssh_username}/benchmark-status.txt",
-      "cd /opt/aeron/playbooks && ansible-playbook -i 'localhost,' -c local site.yml -e 'hyperthreading=true java_version=${var.java_version} ssh_username=${var.ssh_username} aeron_git_repo=${var.aeron_git_repo} aeron_git_branch=${var.aeron_git_branch} benchmarks_repo_url=${var.benchmarks_repo_url} benchmarks_git_branch=${var.benchmarks_git_branch} run_benchmarks_matrix_modes=${var.run_benchmarks_matrix_modes} node_role=controller client_node_ip=${oci_core_instance.benchmark[0].private_ip} receiver_node_ip=${oci_core_instance.benchmark[1].private_ip} failover_node_ip=${var.enable_failover_node ? oci_core_instance.failover[0].private_ip : ""} benchmark_node_ips=${join(",", oci_core_instance.benchmark[*].private_ip)}' -v",
+      "cd /opt/aeron/playbooks && ansible-playbook -i 'localhost,' -c local site.yml -e 'hyperthreading=${var.hyperthreading} java_version=${var.java_version} ssh_username=${var.ssh_username} aeron_git_repo=${var.aeron_git_repo} aeron_git_branch=${var.aeron_git_branch} benchmarks_repo_url=${var.benchmarks_repo_url} benchmarks_git_branch=${var.benchmarks_git_branch} run_benchmarks_matrix_modes=${var.run_benchmarks_matrix_modes} aeron_echo_udp_interface_prefix_length=${var.aeron_echo_udp_interface_prefix_length} aeron_echo_udp_named_interface=${var.aeron_echo_udp_named_interface} aeron_benchmark_configure_host_firewall=${var.aeron_benchmark_configure_host_firewall} aeron_benchmark_host_firewall_persistent=${var.aeron_benchmark_host_firewall_persistent} aeron_benchmark_host_udp_source_cidr=${local.aeron_benchmark_udp_ingress_cidr} node_role=controller client_node_ip=${oci_core_instance.benchmark[0].private_ip} receiver_node_ip=${oci_core_instance.benchmark[1].private_ip} failover_node_ip=${var.enable_failover_node ? oci_core_instance.failover[0].private_ip : ""} benchmark_node_ips=${join(",", oci_core_instance.benchmark[*].private_ip)} ${local.ansible_benchmark_env_extra}' -v",
       "echo \"$(date -u +%Y-%m-%dT%H:%M:%SZ) controller-provisioner: ansible-complete\" | tee -a /home/${var.ssh_username}/benchmark-status.txt",
       "sudo chown -R ${var.ssh_username}:${var.ssh_username} /opt/aeron",
       "echo 'Ansible complete. Check /opt/aeron/benchmarks-dist and /opt/aeron/scripts'",
-    ] : [
+      ] : [
       "echo 'Skipping Aeron installation (install_aeron=false)'",
       "sudo chown -R ${var.ssh_username}:${var.ssh_username} /opt/aeron",
     ]
@@ -335,9 +336,10 @@ resource "null_resource" "benchmark_provisioner" {
   depends_on = [oci_core_instance.benchmark, null_resource.controller_provisioner]
 
   triggers = {
-    instance_id      = oci_core_instance.benchmark[count.index].id
-    playbooks_bundle = data.archive_file.playbooks.id
-    provisioner_rev  = "2026-03-25-node-ssh-keysync-dedicated-key"
+    instance_id              = oci_core_instance.benchmark[count.index].id
+    playbooks_bundle         = data.archive_file.playbooks.id
+    provisioner_rev          = "2026-03-27-benchmark-env-from-tf"
+    benchmark_ansible_resync = local.benchmark_ansible_resync
   }
 
   connection {
@@ -379,7 +381,7 @@ resource "null_resource" "benchmark_provisioner" {
       "sudo rm -rf /opt/aeron/playbooks",
       "sudo mv /tmp/playbooks /opt/aeron/playbooks",
       "sudo chown -R ${var.ssh_username}:${var.ssh_username} /opt/aeron",
-      var.install_aeron ? "cd /opt/aeron/playbooks && ansible-playbook -i 'localhost,' -c local site.yml -e 'hyperthreading=${var.hyperthreading} java_version=${var.java_version} ssh_username=${var.ssh_username} aeron_git_repo=${var.aeron_git_repo} aeron_git_branch=${var.aeron_git_branch} node_role=${count.index == 0 ? "client" : "receiver"}'" : "echo 'Skipping Aeron installation'",
+      var.install_aeron ? "cd /opt/aeron/playbooks && ansible-playbook -i 'localhost,' -c local site.yml -e 'hyperthreading=${var.hyperthreading} java_version=${var.java_version} ssh_username=${var.ssh_username} aeron_git_repo=${var.aeron_git_repo} aeron_git_branch=${var.aeron_git_branch} benchmarks_repo_url=${var.benchmarks_repo_url} benchmarks_git_branch=${var.benchmarks_git_branch} run_benchmarks_matrix_modes=${var.run_benchmarks_matrix_modes} aeron_echo_udp_interface_prefix_length=${var.aeron_echo_udp_interface_prefix_length} aeron_echo_udp_named_interface=${var.aeron_echo_udp_named_interface} aeron_benchmark_configure_host_firewall=${var.aeron_benchmark_configure_host_firewall} aeron_benchmark_host_firewall_persistent=${var.aeron_benchmark_host_firewall_persistent} aeron_benchmark_host_udp_source_cidr=${local.aeron_benchmark_udp_ingress_cidr} node_role=${count.index == 0 ? "client" : "receiver"} client_node_ip=${oci_core_instance.benchmark[0].private_ip} receiver_node_ip=${oci_core_instance.benchmark[1].private_ip} failover_node_ip=${var.enable_failover_node ? oci_core_instance.failover[0].private_ip : ""} benchmark_node_ips=${join(",", oci_core_instance.benchmark[*].private_ip)} ${local.ansible_benchmark_env_extra}'" : "echo 'Skipping Aeron installation'",
     ]
   }
 
@@ -422,9 +424,10 @@ resource "null_resource" "failover_provisioner" {
   depends_on = [oci_core_instance.failover, null_resource.controller_provisioner]
 
   triggers = {
-    instance_id      = oci_core_instance.failover[0].id
-    playbooks_bundle = data.archive_file.playbooks.id
-    provisioner_rev  = "2026-03-25-node-ssh-keysync-dedicated-key"
+    instance_id              = oci_core_instance.failover[0].id
+    playbooks_bundle         = data.archive_file.playbooks.id
+    provisioner_rev          = "2026-03-27-benchmark-env-from-tf"
+    benchmark_ansible_resync = local.benchmark_ansible_resync
   }
 
   connection {
@@ -466,7 +469,7 @@ resource "null_resource" "failover_provisioner" {
       "sudo rm -rf /opt/aeron/playbooks",
       "sudo mv /tmp/playbooks /opt/aeron/playbooks",
       "sudo chown -R ${var.ssh_username}:${var.ssh_username} /opt/aeron",
-      var.install_aeron ? "cd /opt/aeron/playbooks && ansible-playbook -i 'localhost,' -c local site.yml -e 'hyperthreading=${var.hyperthreading} java_version=${var.java_version} ssh_username=${var.ssh_username} aeron_git_repo=${var.aeron_git_repo} aeron_git_branch=${var.aeron_git_branch} node_role=failover'" : "echo 'Skipping Aeron installation'",
+      var.install_aeron ? "cd /opt/aeron/playbooks && ansible-playbook -i 'localhost,' -c local site.yml -e 'hyperthreading=${var.hyperthreading} java_version=${var.java_version} ssh_username=${var.ssh_username} aeron_git_repo=${var.aeron_git_repo} aeron_git_branch=${var.aeron_git_branch} benchmarks_repo_url=${var.benchmarks_repo_url} benchmarks_git_branch=${var.benchmarks_git_branch} run_benchmarks_matrix_modes=${var.run_benchmarks_matrix_modes} aeron_echo_udp_interface_prefix_length=${var.aeron_echo_udp_interface_prefix_length} aeron_echo_udp_named_interface=${var.aeron_echo_udp_named_interface} aeron_benchmark_configure_host_firewall=${var.aeron_benchmark_configure_host_firewall} aeron_benchmark_host_firewall_persistent=${var.aeron_benchmark_host_firewall_persistent} aeron_benchmark_host_udp_source_cidr=${local.aeron_benchmark_udp_ingress_cidr} node_role=failover client_node_ip=${oci_core_instance.benchmark[0].private_ip} receiver_node_ip=${oci_core_instance.benchmark[1].private_ip} failover_node_ip=${oci_core_instance.failover[0].private_ip} benchmark_node_ips=${join(",", oci_core_instance.benchmark[*].private_ip)} ${local.ansible_benchmark_env_extra}'" : "echo 'Skipping Aeron installation'",
     ]
   }
 
@@ -519,7 +522,10 @@ resource "null_resource" "run_driver_matrix" {
     run_benchmarks         = tostring(var.run_benchmarks)
     matrix_modes           = var.run_benchmarks_matrix_modes
     # Bump when changing remote-exec steps (e.g. benchmark preflight) so apply re-runs the matrix.
-    matrix_exec_rev        = "dev-shm-precleanup-v2"
+    matrix_exec_rev               = "aeron-dir-home-aeron-benchmark-shm-v1"
+    benchmark_echo_tune           = "${var.benchmark_echo_runs}-${var.benchmark_echo_iterations}-${var.benchmark_message_length}-${var.benchmark_message_rate}-${var.benchmark_echo_warmup_iterations}-${var.benchmark_echo_warmup_message_rate}"
+    benchmark_ansible_resync      = local.benchmark_ansible_resync
+    run_benchmarks_cluster_matrix = tostring(var.run_benchmarks_cluster_matrix)
   }
 
   connection {
@@ -527,7 +533,8 @@ resource "null_resource" "run_driver_matrix" {
     host        = local.controller_host
     user        = var.ssh_username
     private_key = tls_private_key.ssh.private_key_pem
-    timeout     = "30m"
+    # Echo + cluster matrix can run many hours; allow slow OCI/Ansible reconnect during handshake.
+    timeout = "480m"
   }
 
   provisioner "remote-exec" {
@@ -538,26 +545,40 @@ resource "null_resource" "run_driver_matrix" {
       "STATUS_FILE=\"$RESULTS_DIR/STATUS.txt\"",
       "mkdir -p \"$RESULTS_DIR\"",
       "echo \"$(date -u +%Y-%m-%dT%H:%M:%SZ) run-driver-matrix: started\" | tee -a \"$STATUS_FILE\"",
+      "# Periodic output so long runs do not hit silent SSH idle disconnect (Terraform \"no exit status\").",
+      "( while true; do echo \"$(date -u +%Y-%m-%dT%H:%M:%SZ) run-driver-matrix: ssh-keepalive\" | tee -a \"$STATUS_FILE\"; sleep 90; done ) &",
+      "_MATRIX_HB_PID=$!",
+      "trap 'kill $${_MATRIX_HB_PID} 2>/dev/null || true; wait $${_MATRIX_HB_PID} 2>/dev/null || true' EXIT",
       "cd /opt/aeron/benchmarks-dist/scripts",
       "mkdir -p ./config",
       "cp -f /opt/aeron/scripts/config/benchmark-config.env ./config/benchmark-config.env",
+      "# Sanitize benchmark-config.env inline (avoid CRLF in zipped sanitize-benchmark-config-env.sh from Windows breaking dash).",
+      "sed -i -E 's#/([0-9]+)\\}+#/\\1#g' ./config/benchmark-config.env || true",
+      "sed -i -E 's/(AERON_ECHO_UDP_INTERFACE_PREFIX_LENGTH=\")([0-9]+)\\}\"/\\1\\2\"/g' ./config/benchmark-config.env || true",
+      "sed -i -E 's/(AERON_ECHO_UDP_INTERFACE_PREFIX_LENGTH=)([0-9]+)\\}/\\1\\2/g' ./config/benchmark-config.env || true",
       "echo \"$(date -u +%Y-%m-%dT%H:%M:%SZ) run-driver-matrix: config-ready\" | tee -a \"$STATUS_FILE\"",
-      "echo \"$(date -u +%Y-%m-%dT%H:%M:%SZ) run-driver-matrix: sudo rm /dev/shm/aeron on benchmark nodes (root-owned dir breaks MediaDriver)\" | tee -a \"$STATUS_FILE\"",
+      "echo \"$(date -u +%Y-%m-%dT%H:%M:%SZ) run-driver-matrix: sudo rm /dev/shm/aeron + ~/aeron-benchmark-shm on benchmark nodes\" | tee -a \"$STATUS_FILE\"",
       "${local.benchmark_dev_shm_cleanup}",
-      "chmod +x ./wrapper-echo-unified.sh ./wrapper-cluster-unified.sh ./aggregate-compare-results.sh ./run-driver-matrix.sh || true",
+      "chmod +x ./wrapper-echo-unified.sh ./wrapper-cluster-unified.sh ./aggregate-compare-results.sh ./run-driver-matrix.sh ./sanitize-benchmark-config-env.sh 2>/dev/null || true",
       "export CONFIG_FILE=./config/benchmark-config.env",
       "export MATRIX_MODES=\"${var.run_benchmarks_matrix_modes}\"",
       "export STATUS_FILE=\"$STATUS_FILE\"",
+      "# Fail apply if matrix exits non-zero (pipefail): timeouts, Java exceptions, or any failed mode when MATRIX_STRICT=1",
+      "export MATRIX_STRICT=1",
       "echo \"$(date -u +%Y-%m-%dT%H:%M:%SZ) run-driver-matrix: running ECHO modes=$MATRIX_MODES\" | tee -a \"$STATUS_FILE\"",
       "export SUMMARY_FILE=\"$RESULTS_DIR/driver-matrix-echo-summary.csv\"",
-      "./run-driver-matrix.sh echo | tee \"$RESULTS_DIR/run-driver-matrix-echo.log\"",
-      "echo \"$(date -u +%Y-%m-%dT%H:%M:%SZ) run-driver-matrix: echo-finished\" | tee -a \"$STATUS_FILE\"",
+      "# PIPESTATUS: capture matrix exit after tee (use $$ in .tf so bash vars are not parsed as HCL)",
+      "./run-driver-matrix.sh echo 2>&1 | tee \"$RESULTS_DIR/run-driver-matrix-echo.log\"; matrix_ec=$${PIPESTATUS[0]}",
+      "echo \"$(date -u +%Y-%m-%dT%H:%M:%SZ) run-driver-matrix: echo-finished exit=$${matrix_ec}\" | tee -a \"$STATUS_FILE\"",
+      "if [[ \"$${matrix_ec}\" -ne 0 ]]; then exit \"$${matrix_ec}\"; fi",
       "cp -f ./aeron-echo-*.tar.gz \"$RESULTS_DIR/\" 2>/dev/null || true",
-      var.enable_failover_node ? "echo \"$(date -u +%Y-%m-%dT%H:%M:%SZ) run-driver-matrix: failover detected, running CLUSTER modes=$MATRIX_MODES\" | tee -a \"$STATUS_FILE\"" : "echo \"$(date -u +%Y-%m-%dT%H:%M:%SZ) run-driver-matrix: failover not enabled, skipping cluster matrix\" | tee -a \"$STATUS_FILE\"",
-      var.enable_failover_node ? "export SUMMARY_FILE=\"$RESULTS_DIR/driver-matrix-cluster-summary.csv\"; ./run-driver-matrix.sh cluster | tee \"$RESULTS_DIR/run-driver-matrix-cluster.log\"" : "true",
-      var.enable_failover_node ? "echo \"$(date -u +%Y-%m-%dT%H:%M:%SZ) run-driver-matrix: cluster-finished\" | tee -a \"$STATUS_FILE\"" : "true",
+      var.enable_failover_node && var.run_benchmarks_cluster_matrix ? "echo \"$(date -u +%Y-%m-%dT%H:%M:%SZ) run-driver-matrix: failover + cluster matrix enabled, running CLUSTER modes=$MATRIX_MODES\" | tee -a \"$STATUS_FILE\"" : "echo \"$(date -u +%Y-%m-%dT%H:%M:%SZ) run-driver-matrix: skipping cluster matrix (failover=${var.enable_failover_node}, run_benchmarks_cluster_matrix=${var.run_benchmarks_cluster_matrix})\" | tee -a \"$STATUS_FILE\"",
+      var.enable_failover_node && var.run_benchmarks_cluster_matrix ? "export SUMMARY_FILE=\"$RESULTS_DIR/driver-matrix-cluster-summary.csv\"; export MATRIX_STRICT=1; export MATRIX_MODE_TIMEOUT_SEC=\"$${MATRIX_MODE_TIMEOUT_SEC:-1800}\"; ./run-driver-matrix.sh cluster 2>&1 | tee \"$RESULTS_DIR/run-driver-matrix-cluster.log\"; matrix_ec=$${PIPESTATUS[0]}; if [[ \"$${matrix_ec}\" -ne 0 ]]; then exit \"$${matrix_ec}\"; fi" : "true",
+      var.enable_failover_node && var.run_benchmarks_cluster_matrix ? "echo \"$(date -u +%Y-%m-%dT%H:%M:%SZ) run-driver-matrix: cluster-finished\" | tee -a \"$STATUS_FILE\"" : "true",
       "cp -f ./aeron-cluster-*.tar.gz \"$RESULTS_DIR/\" 2>/dev/null || true",
       "cp -f ./*-report.hgrm \"$RESULTS_DIR/\" 2>/dev/null || true",
+      "echo \"$(date -u +%Y-%m-%dT%H:%M:%SZ) run-driver-matrix: writing terraform-matrix-summary.json\" | tee -a \"$STATUS_FILE\"",
+      "python3 /opt/aeron/playbooks/scripts/terraform-matrix-summary.py \"$RESULTS_DIR\" ${local.benchmark_driver_matrix_profile} ${var.benchmark_echo_runs} ${var.benchmark_echo_iterations} ${var.benchmark_echo_warmup_iterations} 2>/dev/null || echo \"terraform-matrix-summary.py skipped (no python3?)\" | tee -a \"$STATUS_FILE\"",
       "echo \"$(date -u +%Y-%m-%dT%H:%M:%SZ) run-driver-matrix: artifacts-copied\" | tee -a \"$STATUS_FILE\"",
       "ls -la \"$RESULTS_DIR\"",
       "echo \"$(date -u +%Y-%m-%dT%H:%M:%SZ) run-driver-matrix: completed\" | tee -a \"$STATUS_FILE\"",

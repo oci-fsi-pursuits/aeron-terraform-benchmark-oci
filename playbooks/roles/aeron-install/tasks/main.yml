@@ -12,6 +12,13 @@
     - "{{ aeron_dir }}/results"
     - "/dev/shm/aeron"
 
+# Leftover or hand-edited kitware.list can be malformed and makes every apt fail before benchmarks-build rewrites it.
+- name: Remove stale Kitware APT list if present (Debian)
+  file:
+    path: /etc/apt/sources.list.d/kitware.list
+    state: absent
+  when: ansible_os_family == 'Debian'
+
 - name: Install git and benchmark tooling (Ubuntu)
   apt:
     name:
@@ -24,6 +31,8 @@
       - pciutils
       - net-tools
       - lsof
+      # aeron-io/benchmarks collect-environment-info calls lstopo (package name: hwloc on Ubuntu)
+      - hwloc
     state: present
     update_cache: yes
   when: ansible_os_family == 'Debian'
@@ -199,17 +208,22 @@
       net.core.wmem_max={{ socket_buf }}
       net.core.rmem_default={{ socket_buf }}
       net.core.wmem_default={{ socket_buf }}
-      net.core.netdev_max_backlog=30000
+      net.core.netdev_max_backlog=100000
+      net.core.busy_poll=50
+      net.core.busy_read=50
+      net.core.rps_sock_flow_entries=0
       net.core.optmem_max=67108864
       kernel.numa_balancing=0
       vm.swappiness=10
       vm.dirty_ratio=10
       vm.dirty_background_ratio=5
     mode: '0644'
+  when: (node_role | default('')) in ['client', 'receiver', 'failover']
 
 - name: Apply sysctl
   command: sysctl -p /etc/sysctl.d/99-aeron-benchmarks.conf
   changed_when: true
+  when: (node_role | default('')) in ['client', 'receiver', 'failover']
 
 - name: Configure CPU isolation GRUB drop-in (optional, requires reboot)
   copy:
