@@ -80,6 +80,7 @@ variableGroups:
   - title: "Network Configuration"
     variables:
       - use_existing_vcn
+      - benchmark_cluster_placement_group
       - vcn_compartment_ocid
       - existing_vcn_id
       - existing_public_subnet_id
@@ -191,7 +192,7 @@ variables:
     type: oci:core:instanceshape:name
     title: "Controller Node Shape"
     description: "Compute shape for the controller (orchestrator only, smaller is fine)"
-    default: "VM.Standard.E5.Flex"
+    default: "VM.Standard.E6.Flex"
     required: true
     dependsOn:
       compartmentId: ${compartment_ocid}
@@ -215,6 +216,9 @@ variables:
         - eq:
             - ${controller_shape}
             - "VM.Standard.E5.Flex"
+        - eq:
+            - ${controller_shape}
+            - "VM.Standard.E6.Flex"
         - eq:
             - ${controller_shape}
             - "VM.Standard3.Flex"
@@ -244,6 +248,9 @@ variables:
         - eq:
             - ${controller_shape}
             - "VM.Standard.E5.Flex"
+        - eq:
+            - ${controller_shape}
+            - "VM.Standard.E6.Flex"
         - eq:
             - ${controller_shape}
             - "VM.Standard3.Flex"
@@ -286,7 +293,7 @@ variables:
     type: oci:core:instanceshape:name
     title: "Benchmark Node Shape"
     description: "Compute shape for benchmark nodes (high performance recommended)"
-    default: "VM.Standard.E5.Flex"
+    default: "VM.Standard.E6.Flex"
     required: true
     dependsOn:
       compartmentId: ${compartment_ocid}
@@ -297,7 +304,7 @@ variables:
     description: "Number of OCPUs per benchmark node (minimum 10 for Aeron performance)"
     minimum: 10
     maximum: 128
-    default: 10
+    default: 16
     required: true
     visible:
       or:
@@ -310,6 +317,9 @@ variables:
         - eq:
             - ${benchmark_shape}
             - "VM.Standard.E5.Flex"
+        - eq:
+            - ${benchmark_shape}
+            - "VM.Standard.E6.Flex"
         - eq:
             - ${benchmark_shape}
             - "VM.Standard3.Flex"
@@ -326,7 +336,7 @@ variables:
     description: "Memory in GB per benchmark node"
     minimum: 16
     maximum: 1024
-    default: 64
+    default: 124
     required: true
     visible:
       or:
@@ -369,7 +379,7 @@ variables:
   failover_ad:
     type: oci:identity:availabilitydomain:name
     title: "Failover Node Availability Domain"
-    description: "AD for failover node (must be different from benchmark nodes)"
+    description: "Pick an AD different from Benchmark Nodes AD (the console lists all ADs; Terraform rejects the same AD as benchmark_ad). If capacity errors occur, try another AD."
     required: true
     visible:
       eq:
@@ -382,7 +392,7 @@ variables:
     type: oci:core:instanceshape:name
     title: "Failover Node Shape"
     description: "Compute shape for the failover node"
-    default: "VM.Standard.E5.Flex"
+    default: "VM.Standard.E6.Flex"
     required: true
     visible:
       eq:
@@ -408,7 +418,7 @@ variables:
     title: "Failover Node Memory (GB)"
     minimum: 16
     maximum: 1024
-    default: 64
+    default: 124
     visible:
       eq:
         - ${enable_failover_node}
@@ -451,6 +461,16 @@ variables:
     title: "Use Existing VCN"
     description: "Use an existing VCN instead of creating a new one"
     default: false
+
+  benchmark_cluster_placement_group:
+    type: string
+    title: "Benchmark cluster placement group"
+    description: "Places benchmark VMs in an OCI cluster placement group in the benchmark AD (tighter physical proximity). auto = create when you create a new VCN; skip when using an existing VCN. Use on/off to force."
+    enum:
+      - auto
+      - on
+      - off
+    default: auto
 
   vcn_compartment_ocid:
     type: oci:identity:compartment:id

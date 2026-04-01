@@ -38,18 +38,20 @@ failover_ad          = "pILZ:PHX-AD-1"
 # -----------------------------------------------------------------------------
 # Node sizing
 # -----------------------------------------------------------------------------
-controller_shape     = "VM.Standard.E5.Flex"
+controller_shape     = "VM.Standard.E6.Flex"
 controller_ocpus     = 2
 controller_memory_gb = 16
 
-benchmark_shape        = "VM.Standard.E5.Flex"
+benchmark_shape        = "VM.Standard.E6.Flex"
 benchmark_node_count   = 2
-benchmark_ocpus        = 10
-benchmark_memory_gb    = 64
+benchmark_ocpus        = 16
+benchmark_memory_gb    = 124
 
-failover_shape     = "VM.Standard.E5.Flex"
-failover_ocpus     = 10
-failover_memory_gb = 64
+failover_shape     = "VM.Standard.E6.Flex"
+failover_ocpus     = 16
+failover_memory_gb = 124
+
+# benchmark_cluster_placement_group = "auto" # auto|on|off — auto creates CPG when use_existing_vcn is false
 
 # -----------------------------------------------------------------------------
 # Networking

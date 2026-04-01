@@ -83,6 +83,8 @@ resource "oci_core_instance" "benchmark" {
   shape               = var.benchmark_shape
   display_name        = "${local.cluster_name}-${count.index == 0 ? "client" : count.index == 1 ? "receiver" : format("node-%d", count.index + 1)}"
 
+  cluster_placement_group_id = lookup({ for k, v in oci_cluster_placement_groups_cluster_placement_group.benchmark : k => v.id }, 0, null)
+
   dynamic "shape_config" {
     for_each = local.is_benchmark_flex_shape ? [1] : []
     content {
@@ -116,8 +118,14 @@ resource "oci_core_instance" "benchmark" {
   create_vnic_details {
     subnet_id        = local.private_subnet_id
     assign_public_ip = false
-    hostname_label   = "benchmark-${count.index + 1}"
-    nsg_ids          = [oci_core_network_security_group.aeron_benchmark.id]
+    hostname_label = substr(
+      "${local.vnic_hostname_prefix_final}-${
+        count.index == 0 ? "client" : count.index == 1 ? "receiver" : format("node%d", count.index + 1)
+      }",
+      0,
+      63
+    )
+    nsg_ids = [oci_core_network_security_group.aeron_benchmark.id]
   }
 
   metadata = {

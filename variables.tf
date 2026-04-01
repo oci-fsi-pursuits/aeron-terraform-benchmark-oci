@@ -49,7 +49,7 @@ variable "controller_ad" {
 variable "controller_shape" {
   type        = string
   description = "Compute shape for the controller node"
-  default     = "VM.Standard.E5.Flex"
+  default     = "VM.Standard.E6.Flex"
 }
 
 variable "controller_ocpus" {
@@ -91,13 +91,13 @@ variable "benchmark_node_count" {
 variable "benchmark_shape" {
   type        = string
   description = "Compute shape for benchmark nodes"
-  default     = "VM.Standard.E5.Flex"
+  default     = "VM.Standard.E6.Flex"
 }
 
 variable "benchmark_ocpus" {
   type        = number
   description = "Number of OCPUs for each benchmark node (minimum 10 for Aeron performance)"
-  default     = 10
+  default     = 16
   validation {
     condition     = var.benchmark_ocpus >= 10
     error_message = "Benchmark nodes require at least 10 OCPUs for optimal Aeron performance."
@@ -107,7 +107,7 @@ variable "benchmark_ocpus" {
 variable "benchmark_memory_gb" {
   type        = number
   description = "Memory in GB for each benchmark node"
-  default     = 64
+  default     = 124
 }
 
 variable "benchmark_boot_volume_size_gb" {
@@ -129,18 +129,25 @@ variable "failover_ad" {
   type        = string
   description = "Availability Domain for the failover node (must be different from benchmark nodes)"
   default     = ""
+
+  validation {
+    condition = !var.enable_failover_node || (
+      length(trimspace(var.failover_ad)) > 0 && var.failover_ad != var.benchmark_ad
+    )
+    error_message = "When enable_failover_node is true, failover_ad must be non-empty and must not match benchmark_ad (choose a different AD)."
+  }
 }
 
 variable "failover_shape" {
   type        = string
   description = "Compute shape for the failover node"
-  default     = "VM.Standard.E5.Flex"
+  default     = "VM.Standard.E6.Flex"
 }
 
 variable "failover_ocpus" {
   type        = number
   description = "Number of OCPUs for the failover node (minimum 10)"
-  default     = 10
+  default     = 16
   validation {
     condition     = var.failover_ocpus >= 10
     error_message = "Failover node requires at least 10 OCPUs."
@@ -150,7 +157,7 @@ variable "failover_ocpus" {
 variable "failover_memory_gb" {
   type        = number
   description = "Memory in GB for the failover node"
-  default     = 64
+  default     = 124
 }
 
 variable "failover_boot_volume_size_gb" {
@@ -186,6 +193,17 @@ variable "use_existing_vcn" {
   type        = bool
   description = "Use an existing VCN instead of creating a new one"
   default     = false
+}
+
+variable "benchmark_cluster_placement_group" {
+  type        = string
+  description = "Cluster placement group in benchmark_ad for benchmark VMs (physical proximity). auto: create when use_existing_vcn is false, skip when true. on: always create. off: never."
+  default     = "auto"
+
+  validation {
+    condition     = contains(["auto", "on", "off"], var.benchmark_cluster_placement_group)
+    error_message = "benchmark_cluster_placement_group must be auto, on, or off."
+  }
 }
 
 variable "vcn_compartment_ocid" {
