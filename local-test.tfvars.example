@@ -3,6 +3,10 @@
 #   cp local-test.tfvars.example local-test.tfvars
 # Never commit local-test.tfvars: it holds tenancy, compartment, network OCIDs,
 # and your SSH public key.
+#
+# Defaults (see README.md → Configuration Options): benchmark/failover E6.Flex
+# 16 OCPU / 124 GB; controller E6.Flex 2 OCPU / 16 GB. Uncomment blocks below
+# to override git, echo tuning, UDP interface, CPU affinity, placement group, etc.
 # -----------------------------------------------------------------------------
 # Usage:
 #   terraform plan  -var-file="local-test.tfvars"

@@ -24,9 +24,9 @@ Deploy [Aeron](https://github.com/real-logic/aeron) on OCI for high-performance 
 
 This stack deploys:
 
-- **One controller** (orchestrator) in a **public subnet** — small footprint, used for SSH access and running playbooks.
-- **Two or more benchmark nodes** (client/receiver) in a **private subnet** — each with at least 10 OCPUs, used for the actual latency and throughput tests.
-- **Optional failover node** in the same private subnet but a **different Availability Domain** — same 10 OCPU minimum, for high availability.
+- **One controller** (orchestrator) in a **public subnet** — default **VM.Standard.E6.Flex**, **2 OCPU / 16 GB**; SSH bastion and Ansible.
+- **Two or more benchmark nodes** (client/receiver) in a **private subnet** — default **VM.Standard.E6.Flex**, **16 OCPU / 124 GB** each (minimum **10** OCPU is enforced in Terraform).
+- **Optional failover node** in the same private subnet but a **different Availability Domain** — default **16 OCPU / 124 GB**, same shape family as benchmark nodes.
 
 - **Aeron** (real-logic/aeron) is built on each node for the Media Driver and samples.
 - **Benchmarks repo** ([aeron-io/benchmarks](https://github.com/aeron-io/benchmarks)) is cloned and built on the controller with `./gradlew deployTar`; the resulting `benchmarks-dist` is deployed to all benchmark nodes. Ansible applies socket buffer tuning, optional CPU isolation, and a fixed profile (288B @ 101K msg/s). Wrapper scripts for two-node echo (and optional cluster) live in `benchmarks-dist/scripts/` and are driven by a stack-generated config so the benchmark runs without Java 17 module errors (JVM `--add-opens`).
@@ -39,9 +39,9 @@ This stack deploys:
 
 | Role | Subnet | Default size | Purpose |
 |------|--------|--------------|---------|
-| **Controller** | Public | 2 OCPUs | Orchestrator only: SSH bastion, runs Ansible, collects results. Does not run the heavy benchmark workload. |
-| **Benchmark nodes** | Private | 10+ OCPUs each | **Client** (first node) and **Receiver** (second node). Run the Media Driver, Pong (echo server), and Ping (client) for latency/throughput tests. |
-| **Failover** (optional) | Private (different AD) | 10+ OCPUs | Standby node in another Availability Domain for HA. Same Aeron setup as benchmark nodes. |
+| **Controller** | Public | E6.Flex, 2 OCPU / 16 GB | Orchestrator: SSH bastion, Ansible, results. Not the heavy benchmark workload. |
+| **Benchmark nodes** | Private | E6.Flex, 16 OCPU / 124 GB | **Client** (first) and **Receiver** (second). Media Driver, echo/cluster workloads. |
+| **Failover** (optional) | Private (different AD) | E6.Flex, 16 OCPU / 124 GB | HA standby; **failover AD must differ from benchmark AD** (enforced at plan). |
 
 ### Network Layout
 
@@ -53,17 +53,17 @@ This stack deploys:
   ───────►          │  │   PUBLIC SUBNET      │     │   PRIVATE SUBNET    │    │
   SSH only          │  │                     │     │                     │    │
                     │  │  ┌───────────────┐  │     │  ┌───────────────┐  │    │
-                    │  │  │  CONTROLLER   │  │     │  │  BENCHMARK-1   │  │    │
-                    │  │  │  (orchestrator)│  │     │  │  (client)     │  │    │
-                    │  │  │  2 OCPU       │  │     │  │  10+ OCPU      │  │    │
+                    │  │  │  CONTROLLER   │  │     │  │  CLIENT        │  │    │
+                    │  │  │  (orchestrator)│  │     │  │  (benchmark)   │  │    │
+                    │  │  │  2 OCPU       │  │     │  │  16 OCPU       │  │    │
                     │  │  └───────┬───────┘  │     │  └───────┬───────┘  │    │
                     │  │          │          │     │          │          │    │
                     │  │          │ SSH      │     │          │ UDP      │    │
                     │  │          │ bastion  │     │          │ Aeron    │    │
                     │  │          ▼          │     │  ┌───────▼───────┐  │    │
-                    │  └─────────────────────┘     │  │  BENCHMARK-2   │  │    │
-                    │                              │  │  (receiver)    │  │    │
-                    │                              │  │  10+ OCPU      │  │    │
+                    │  └─────────────────────┘     │  │  RECEIVER      │  │    │
+                    │                              │  │  (benchmark)   │  │    │
+                    │                              │  │  16 OCPU       │  │    │
                     │                              │  └────────────────┘  │    │
                     │                              │  ┌─────────────────┐  │    │
                     │                              │  │  FAILOVER (opt)  │  │    │
@@ -134,90 +134,54 @@ All are typically reported in **microseconds (µs)**. Good tuning keeps P50/P99 
 
 ### Deploy via OCI Resource Manager
 
-1. Click **Deploy to Oracle Cloud** at the top.
-2. Sign in and select compartment and region.
-3. Set **Controller** AD and shape (default 2 OCPU is fine).
-4. Set **Benchmark nodes** AD, count (minimum 2), and shape (10+ OCPUs).
-5. Optionally enable **Failover** and choose another AD.
-6. Configure or select VCN/subnets, then **Apply**.
+1. Use **Deploy to Oracle Cloud** (badge above).
+2. Set **compartment**, **region**, **SSH public key**, and **Availability Domains** for controller and benchmark nodes.
+3. Defaults are **E6.Flex** with **16 OCPU / 124 GB** on benchmark and failover; controller stays **2 / 16**.
+4. **Network:** new VCN or existing; optional **Create benchmark cluster placement group** (checkbox, default on) only when **not** using an existing VCN.
+5. **Aeron:** install toggle, optional automated benchmark run and matrix options; advanced git/Java/echo tuning is hidden and uses Terraform defaults.
 
 ### Deploy via Terraform CLI
 
 ```bash
 git clone https://github.com/oci-fsi-pursuits/aeron-terraform-benchmark-oci.git
-cd aeron-terraform-oci
+cd aeron-terraform-benchmark-oci
 terraform init
-# Create terraform.tfvars with compartment_ocid, ssh_public_key, controller_ad, benchmark_ad, etc.
-terraform plan
-terraform apply
+cp local-test.tfvars.example local-test.tfvars   # edit OCIDs, ADs, key
+terraform plan  -var-file=local-test.tfvars
+terraform apply -var-file=local-test.tfvars
 ```
 
-After apply, note the **controller public IP** and **benchmark private IPs** from the stack outputs.
+After apply, use stack **outputs** for controller public IP and benchmark private IPs.
 
 ---
 
 ## Configuration Options
 
-### Controller (orchestrator)
+**Default sizing:** benchmark and failover **VM.Standard.E6.Flex**, **16 OCPU**, **124 GB** RAM; controller **E6.Flex**, **2 OCPU**, **16 GB**. Terraform still enforces **≥ 10 OCPU** on benchmark/failover flex shapes.
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `controller_ad` | — | Availability Domain for controller. |
-| `controller_shape` | `VM.Standard.E5.Flex` | Shape (flex allowed). |
-| `controller_ocpus` | `2` | OCPUs (no minimum; orchestrator only). |
-| `controller_memory_gb` | `16` | Memory in GB. |
+### Terraform defaults (selected)
 
-### Benchmark nodes (client/receiver)
+| Area | Variable | Default | Notes |
+|------|----------|---------|--------|
+| Controller | `controller_shape` / `controller_ocpus` / `controller_memory_gb` | `VM.Standard.E6.Flex` / `2` / `16` | |
+| Benchmark | `benchmark_shape` / `benchmark_ocpus` / `benchmark_memory_gb` | `VM.Standard.E6.Flex` / `16` / `124` | `benchmark_node_count` default `2`. |
+| Failover | `failover_shape` / `failover_ocpus` / `failover_memory_gb` | `VM.Standard.E6.Flex` / `16` / `124` | `enable_failover_node` default `false`. |
+| Network | `use_existing_vcn` | `false` | Subnet OCIDs required when `true`. |
+| Placement | `create_benchmark_cluster_placement_group` | `true` | Effective only when **not** using an existing VCN (`false` if `use_existing_vcn`). |
+| Image | `use_default_image` | `true` | Ubuntu 24.04 Minimal. |
+| Aeron | `install_aeron` / `run_benchmarks` | `true` / `false` | Matrix modes default `java,java_vma,c,c_vma`. |
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `benchmark_ad` | — | Availability Domain for all benchmark nodes. |
-| `benchmark_node_count` | `2` | Number of nodes (minimum 2). |
-| `benchmark_shape` | `VM.Standard.E5.Flex` | Shape. |
-| `benchmark_ocpus` | `10` | OCPUs per node (minimum 10). |
-| `benchmark_memory_gb` | `64` | Memory per node. |
+Full definitions: `variables.tf`. Example overrides: `local-test.tfvars.example` (copy to `local-test.tfvars`, gitignored).
 
-### Failover (optional)
+### Resource Manager (`schema.yaml`)
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `enable_failover_node` | `false` | Create failover node. |
-| `failover_ad` | — | AD (should differ from benchmark_ad). |
-| `failover_ocpus` | `10` | OCPUs (minimum 10). |
+The console shows **grouped** variables. **Hidden** (not in the wizard; stack uses Terraform defaults): tenancy/region/SSH username/instance principal/default image name, **cluster CPU affinity**, **Aeron/benchmarks git URLs and branches**, **Java version**, **echo smoke tuning** (runs/iterations/warmup/rates/message size), and **echo UDP interface** (`prefix length` / named interface). **Visible** groups include: Basic, Controller, Benchmark, Failover, Performance (**hyperthreading** only), Network (including **Create benchmark cluster placement group** when creating a new VCN), Image, and Aeron (**install**, **run benchmarks**, matrix modes, cluster matrix, pull summary for output, **build native aeronmd**).
 
-### Network
+### Terraform CLI (`local-test.tfvars.example`)
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `use_existing_vcn` | `false` | Use existing VCN. |
-| `existing_public_subnet_id` | — | Public subnet for controller. |
-| `existing_private_subnet_id` | — | Private subnet for benchmark/failover. |
-| `private_deployment` | `false` | Controller without public IP (VPN/FastConnect). |
+**Required in practice:** `tenancy_ocid`, `region`, `compartment_ocid`, `ssh_public_key`, `controller_ad`, `benchmark_ad`, and either new-VCN fields or `use_existing_vcn` plus VCN/subnet OCIDs. **Optional:** sizing, `enable_failover_node` + `failover_ad` (≠ `benchmark_ad`), `hyperthreading`, image choice, Aeron/benchmark/git/echo variables commented in the example. Requires **Terraform ≥ 1.5** (check blocks).
 
-### Cluster naming and OCI hostnames
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `cluster_name` | `aeron` | Prefix for resource display names and tags. |
-| `use_custom_name` | `false` | If false, `cluster_name` is suffixed with a random pet (e.g. `aeron-magnetic-bug`). If true, uses `cluster_name` exactly for display names. |
-| `instance_hostname_prefix` | `""` | Optional DNS-safe prefix for **VNIC hostname labels** (must be **unique per subnet**). Empty: derived from `cluster_name`; when `use_custom_name=true`, a **random pet** is appended automatically so two stacks can share subnets. Set explicitly when you need a stable prefix (e.g. `myproj-phx-b`). |
-
-Instance **display names** use `client` / `receiver` (not `benchmark-1` / `benchmark-2`). **VNIC hostnames** look like `{prefix}-controller`, `{prefix}-client`, `{prefix}-receiver`, `{prefix}-failover` (truncated to 63 characters).
-
-### Aeron, benchmarks repo, and image
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `install_aeron` | `true` | Install Aeron and build benchmarks repo. |
-| `aeron_git_repo` | `https://github.com/real-logic/aeron.git` | Aeron (Media Driver/samples) repo. |
-| `aeron_git_branch` | `""` | Branch/tag (empty = master). |
-| `benchmarks_repo_url` | `https://github.com/aeron-io/benchmarks` | Official benchmarks repo (LoadTestRig, echo/cluster). |
-| `benchmarks_git_branch` | `""` | Branch/tag (empty = master). |
-| `java_version` | `17` | OpenJDK version (17 recommended; JVM opts include `--add-opens` for Agrona). |
-| `run_benchmarks` | `false` | Automatically run benchmark matrix after provisioning completes. |
-| `run_benchmarks_matrix_modes` | `java,java_vma,c,c_vma` | Driver modes to test in matrix run (comma-separated). |
-| `hyperthreading` | `false` | SMT on benchmark/failover (off for latency). |
-| `use_default_image` | `true` | Ubuntu 24.04 Minimal image. |
+**Hostnames:** display names use **client** / **receiver**. VNIC labels use `{prefix}-controller|client|receiver|failover` (prefix from `cluster_name` / pet / `instance_hostname_prefix`; max 63 chars) so shared subnets do not collide.
 
 ---
 
