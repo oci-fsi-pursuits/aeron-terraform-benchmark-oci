@@ -1,6 +1,6 @@
 # Aeron Deployment for Oracle Cloud Infrastructure
 
-[![Deploy to Oracle Cloud](https://oci-resourcemanager-plugin.plugins.oci.oraclecloud.com/latest/deploy-to-oracle-cloud.svg)](https://cloud.oracle.com/resourcemanager/stacks/create?zipUrl=https://github.com/ncusato/aeron-terraform-oci/releases/latest/download/AeronMessagingTerraform.zip)
+[![Deploy to Oracle Cloud](https://oci-resourcemanager-plugin.plugins.oci.oraclecloud.com/latest/deploy-to-oracle-cloud.svg)](https://cloud.oracle.com/resourcemanager/stacks/create?zipUrl=https://github.com/oci-fsi-pursuits/aeron-terraform-benchmark-oci/releases/latest/download/AeronMessagingTerraform.zip)
 
 Deploy [Aeron](https://github.com/real-logic/aeron) on OCI for high-performance messaging benchmarks. The stack uses the official **[aeron-io/benchmarks](https://github.com/aeron-io/benchmarks)** repo (LoadTestRig, echo/cluster scenarios, HDR histograms) by default and includes wrapper scripts for two-node echo testing. This README aligns with the [quickstart guide](docs/INCONSISTENCIES-QUICKSTART-VS-STACK.md) as the source of truth for node roles, Ansible pipeline, and benchmark workflow.
 
@@ -144,7 +144,7 @@ All are typically reported in **microseconds (µs)**. Good tuning keeps P50/P99 
 ### Deploy via Terraform CLI
 
 ```bash
-git clone https://github.com/ncusato/aeron-terraform-oci.git
+git clone https://github.com/oci-fsi-pursuits/aeron-terraform-benchmark-oci.git
 cd aeron-terraform-oci
 terraform init
 # Create terraform.tfvars with compartment_ocid, ssh_public_key, controller_ad, benchmark_ad, etc.
