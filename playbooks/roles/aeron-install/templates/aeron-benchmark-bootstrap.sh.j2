@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+# Remediation handoff: uncap init + sshd CPU affinity (fixes nproc/shell stuck on housekeeping cpuset),
+# apply housekeeping IRQ mask, persist benchmark-subnet iptables (reboot clears runtime-only rules).
+set -euo pipefail
+TOTAL=$(nproc --all 2>/dev/null || nproc)
+LAST=$(( TOTAL - 1 ))
+RANGE="0-${LAST}"
+taskset -pc "${RANGE}" 1 2>/dev/null || true
+if command -v pgrep >/dev/null 2>&1; then
+  SSHD_PID="$(pgrep -o sshd 2>/dev/null || true)"
+  if [[ -n "${SSHD_PID}" ]]; then
+    taskset -pc "${RANGE}" "${SSHD_PID}" 2>/dev/null || true
+  fi
+fi
+if [[ -x {{ aeron_dir }}/bin/aeron-set-default-irq-affinity.sh ]]; then
+  {{ aeron_dir }}/bin/aeron-set-default-irq-affinity.sh
+fi
+
+HK_CPUS_FILE="{{ aeron_dir }}/housekeeping-cpus"
+HK_CPUS=""
+if [[ -f "${HK_CPUS_FILE}" ]]; then
+  HK_CPUS="$(tr -d '[:space:]' < "${HK_CPUS_FILE}" || true)"
+fi
+if [[ -n "${HK_CPUS}" ]]; then
+  # Move current mlx/benchmark NIC IRQs onto housekeeping CPUs. This is runtime state,
+  # so the bootstrap service reapplies it after every boot.
+  awk 'tolower($0) ~ /mlx5|ens3|eth1|roce/ {gsub(":", "", $1); print $1}' /proc/interrupts 2>/dev/null | while read -r irq; do
+    [[ -n "${irq}" ]] || continue
+    echo "${HK_CPUS}" > "/proc/irq/${irq}/smp_affinity_list" 2>/dev/null || true
+  done
+
+  if command -v python3 >/dev/null 2>&1; then
+    XPS_MASK="$(TOTAL_CPUS="${TOTAL}" HK_CPUS="${HK_CPUS}" python3 <<'PY'
+import os
+cpus = set()
+for part in os.environ["HK_CPUS"].split(","):
+    part = part.strip()
+    if not part:
+        continue
+    if "-" in part:
+        start, end = part.split("-", 1)
+        cpus.update(range(int(start), int(end) + 1))
+    else:
+        cpus.add(int(part))
+if not cpus:
+    raise SystemExit(0)
+total_cpus = int(os.environ.get("TOTAL_CPUS", "0") or "0")
+max_cpu = max(max(cpus), total_cpus - 1)
+groups = []
+for group_start in range(0, max_cpu + 1, 32):
+    value = 0
+    for cpu in cpus:
+        if group_start <= cpu < group_start + 32:
+            value |= 1 << (cpu - group_start)
+    groups.append(f"{value:08x}")
+print(",".join(groups))
+PY
+)"
+    # Keep filesystem/block writeback off benchmark cores.
+    if [[ -e /sys/bus/workqueue/devices/writeback/cpumask ]]; then
+      echo "${XPS_MASK}" > /sys/bus/workqueue/devices/writeback/cpumask 2>/dev/null || true
+    fi
+
+    # Apply queue policy to actual benchmark NIC names: VCN ens300*, RDMA eth1/ens800*.
+    for dev_path in /sys/class/net/ens3* /sys/class/net/ens8* /sys/class/net/eth1; do
+      [[ -d "${dev_path}" ]] || continue
+      dev="${dev_path##*/}"
+      for q in "/sys/class/net/${dev}"/queues/rx-*/rps_cpus; do
+        [[ -e "${q}" ]] && echo 0 > "${q}" 2>/dev/null || true
+      done
+      for q in "/sys/class/net/${dev}"/queues/tx-*/xps_cpus; do
+        [[ -e "${q}" ]] && echo "${XPS_MASK}" > "${q}" 2>/dev/null || true
+      done
+    done
+  fi
+fi
+{% if aeron_benchmark_configure_host_firewall | default(true) | bool %}
+if command -v iptables >/dev/null 2>&1; then
+  CIDR_FILE="{{ aeron_dir }}/benchmark-ingress-cidr"
+  if [[ -f "${CIDR_FILE}" ]]; then
+    CIDR="$(tr -d '[:space:]' < "${CIDR_FILE}" || true)"
+    if [[ -n "${CIDR}" ]]; then
+      if ! iptables -C INPUT -s "${CIDR}" -j ACCEPT -m comment --comment aeron-benchmark-subnet 2>/dev/null; then
+        iptables -I INPUT 1 -s "${CIDR}" -j ACCEPT -m comment --comment aeron-benchmark-subnet
+      fi
+    fi
+  fi
+fi
+{% endif %}

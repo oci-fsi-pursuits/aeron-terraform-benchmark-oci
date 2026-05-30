@@ -11,3 +11,26 @@
     - (client_node_ip | default('') | trim | length) > 0
     - (receiver_node_ip | default('') | trim | length) > 0
   become: true
+
+# Replacing a node (e.g. failover in another AD) reuses stable /etc/hosts names but changes the host key; scp/ssh then fail until the old key is dropped.
+# Play uses become: true — use the SSH user’s known_hosts (benchmarks/matrix run as ubuntu), not root’s.
+- name: Remove stale SSH known_hosts for Aeron cluster names and node IPs
+  ansible.builtin.shell: |
+    set -eu
+    KH="/home/{{ ssh_username | default('ubuntu') }}/.ssh/known_hosts"
+    test -f "${KH}" || exit 0
+    for h in "{{ aeron_benchmark_client_hostname }}" "{{ aeron_benchmark_receiver_hostname }}" "aeron-benchmark-node1" "aeron-benchmark-node2" "{{ aeron_benchmark_failover_hostname }}"; do
+      ssh-keygen -f "${KH}" -R "${h}" 2>/dev/null || true
+    done
+    for ip in {{ client_node_ip | default('') }} {{ receiver_node_ip | default('') }} {{ benchmark_node_ips | default('') | replace(',', ' ') }} {{ failover_node_ip | default('') }}; do
+      test -n "${ip}" || continue
+      ssh-keygen -f "${KH}" -R "${ip}" 2>/dev/null || true
+    done
+  args:
+    executable: /bin/bash
+  become: false
+  changed_when: false
+  when:
+    - aeron_benchmark_manage_etc_hosts | bool
+    - (client_node_ip | default('') | trim | length) > 0
+    - (receiver_node_ip | default('') | trim | length) > 0

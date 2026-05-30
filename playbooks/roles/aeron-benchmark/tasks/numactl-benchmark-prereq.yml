@@ -1,0 +1,29 @@
+---
+# Wrappers SSH to client/receiver and run numactl there; fail in Ansible before Terraform smoke matrix.
+- name: Ensure numactl is installed (Ubuntu/Debian benchmark nodes)
+  ansible.builtin.apt:
+    name: numactl
+    state: present
+    update_cache: false
+    lock_timeout: 600
+  when:
+    - ansible_os_family == 'Debian'
+    - (node_role | default('')) in ['client', 'receiver', 'failover']
+
+- name: Ensure numactl is installed (RHEL benchmark nodes)
+  ansible.builtin.yum:
+    name: numactl
+    state: present
+  when:
+    - ansible_os_family == 'RedHat'
+    - (node_role | default('')) in ['client', 'receiver', 'failover']
+
+# Same user as wrapper SSH (not root) — avoids false OK when only root can run numactl.
+- name: Verify numactl runs as stack SSH user (matches wrapper remote-exec)
+  ansible.builtin.command: numactl --show
+  become: true
+  become_user: "{{ ssh_username | default('ubuntu') }}"
+  register: numactl_probe
+  changed_when: false
+  failed_when: numactl_probe.rc != 0
+  when: (node_role | default('')) in ['client', 'receiver', 'failover']

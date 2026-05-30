@@ -1,0 +1,38 @@
+---
+# Stop/mask noisy host services for repeatable benchmark windows.
+# Apply: ansible-playbook ... --tags benchmark_host_quiet -e benchmark_host_quiet_apply=true
+# Restore (later run): ... -e benchmark_host_quiet_restore=true (omit apply)
+
+- name: Benchmark quiet — stop and runtime-mask noisy systemd units
+  tags: [benchmark_host_quiet]
+  when: benchmark_host_quiet_apply | default(false) | bool
+  block:
+    - name: Stop/mask apt, unattended-upgrades, snap (benchmark quiet apply)
+      ansible.builtin.shell: |
+        set -euo pipefail
+        for u in apt-daily.timer apt-daily-upgrade.timer unattended-upgrades.service snapd.socket snapd.service; do
+          systemctl stop "$u" 2>/dev/null || true
+        done
+        for u in apt-daily.timer apt-daily-upgrade.timer snapd.socket snapd.service; do
+          systemctl mask --runtime "$u" 2>/dev/null || true
+        done
+      become: true
+      changed_when: true
+
+- name: Benchmark quiet — unmask and start systemd units (restore)
+  tags: [benchmark_host_quiet]
+  when:
+    - benchmark_host_quiet_restore | default(false) | bool
+    - not benchmark_host_quiet_apply | default(false) | bool
+  block:
+    - name: Unmask/start apt and snap units (benchmark quiet restore)
+      ansible.builtin.shell: |
+        set -euo pipefail
+        for u in apt-daily.timer apt-daily-upgrade.timer snapd.socket snapd.service; do
+          systemctl unmask --runtime "$u" 2>/dev/null || true
+        done
+        for u in apt-daily.timer apt-daily-upgrade.timer snapd.socket snapd.service; do
+          systemctl start "$u" 2>/dev/null || true
+        done
+      become: true
+      changed_when: true

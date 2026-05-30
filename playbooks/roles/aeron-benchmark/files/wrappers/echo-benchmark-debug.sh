@@ -19,6 +19,15 @@ echo "cwd: ${SCRIPT_DIR}"
 echo "date: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 echo
 
+_clear="$(dirname "${CONFIG_FILE}")/clear-benchmark-affinity-env.sh"
+if [[ -f "${_clear}" ]]; then
+  # shellcheck source=/dev/null
+  source "${_clear}"
+elif [[ -f "${SCRIPT_DIR}/clear-benchmark-affinity-env.sh" ]]; then
+  # shellcheck source=/dev/null
+  source "${SCRIPT_DIR}/clear-benchmark-affinity-env.sh"
+fi
+
 set -a
 # shellcheck source=/dev/null
 source "${CONFIG_FILE}"

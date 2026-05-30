@@ -36,30 +36,30 @@ output "controller_ssh_command" {
 # =============================================================================
 output "benchmark_instance_ids" {
   description = "OCIDs of the benchmark instances"
-  value       = oci_core_instance.benchmark[*].id
+  value       = local.benchmark_instance_ids
 }
 
 output "benchmark_private_ips" {
   description = "Private IPs of the benchmark instances (in private subnet)"
-  value       = oci_core_instance.benchmark[*].private_ip
+  value       = local.benchmark_private_ips
 }
 
 output "benchmark_ssh_commands" {
   description = "SSH commands to connect to benchmark nodes (via controller bastion)"
   value = [
-    for idx, ip in oci_core_instance.benchmark[*].private_ip :
+    for idx, ip in local.benchmark_private_ips :
     "ssh -i <your-key> -J ${var.ssh_username}@${var.private_deployment ? oci_core_instance.controller.private_ip : oci_core_instance.controller.public_ip} ${var.ssh_username}@${ip}"
   ]
 }
 
 output "client_node_ip" {
   description = "Private IP of the client node (first benchmark instance; display name *-client)"
-  value       = oci_core_instance.benchmark[0].private_ip
+  value       = local.benchmark_private_ips[0]
 }
 
 output "receiver_node_ip" {
   description = "Private IP of the receiver node (second benchmark instance; display name *-receiver)"
-  value       = var.benchmark_node_count >= 2 ? oci_core_instance.benchmark[1].private_ip : null
+  value       = local.benchmark_node_count_effective >= 2 ? local.benchmark_private_ips[1] : null
 }
 
 # =============================================================================
@@ -98,6 +98,26 @@ output "private_subnet_id" {
   value       = local.private_subnet_id
 }
 
+output "benchmark_compute_cluster_id" {
+  description = "OCI compute cluster OCID used by benchmark nodes when RDMA compute cluster mode is enabled"
+  value       = local.benchmark_compute_cluster_id
+}
+
+output "benchmark_cluster_network_id" {
+  description = "OCI cluster network OCID used by benchmark nodes when enable_benchmark_cluster_network is true"
+  value       = local.enable_benchmark_cluster_network ? oci_core_cluster_network.benchmark[0].id : null
+}
+
+output "benchmark_instance_pool_id" {
+  description = "OCI instance pool OCID used by benchmark nodes when either pooled benchmark mode is enabled"
+  value       = local.enable_benchmark_pooled_instances ? local.benchmark_instance_pool_id : null
+}
+
+output "benchmark_cluster_placement_group_id" {
+  description = "OCI cluster placement group OCID used by primary benchmark nodes"
+  value       = local.benchmark_cluster_placement_group_id
+}
+
 # =============================================================================
 # SSH Key Outputs
 # =============================================================================
@@ -118,7 +138,8 @@ output "aeron_info" {
     java_version         = var.java_version
     hyperthreading       = var.hyperthreading
     controller_ocpus     = var.controller_ocpus
-    benchmark_node_count = var.benchmark_node_count
+    benchmark_node_count = local.benchmark_node_count_effective
+    raft_consensus       = var.enable_cluster_raft_consensus
     benchmark_ocpus      = var.benchmark_ocpus
     failover_enabled     = var.enable_failover_node
     failover_ocpus       = var.enable_failover_node ? var.failover_ocpus : null
@@ -144,7 +165,7 @@ output "node_summary" {
       role       = "orchestrator"
     }
     benchmark_nodes = [
-      for idx, instance in oci_core_instance.benchmark : {
+      for idx, ip in local.benchmark_private_ips : {
         hostname = substr(
           "${local.vnic_hostname_prefix_final}-${
             idx == 0 ? "client" : idx == 1 ? "receiver" : format("node%d", idx + 1)
@@ -152,7 +173,7 @@ output "node_summary" {
           0,
           63
         )
-        private_ip = instance.private_ip
+        private_ip = ip
         ocpus      = var.benchmark_ocpus
         role       = idx == 0 ? "client" : idx == 1 ? "receiver" : "node-${idx + 1}"
       }
@@ -167,49 +188,29 @@ output "node_summary" {
 }
 
 # =============================================================================
-# Driver matrix (smoke vs extended + optional pulled latencies)
+# Driver matrix (smoke vs extended; summaries live on the controller)
 # =============================================================================
 output "benchmark_driver_matrix" {
-  description = "How the post-apply driver matrix is configured and how to interpret it vs full baselines."
+  description = "How the post-apply driver matrix is configured (run_smoke_test vs run_full_benchmark) and how to interpret results vs manual baselines. JSON/CSV artifacts are under results_on_controller (not pulled into terraform output)."
   value = {
     profile_label = local.benchmark_driver_matrix_profile
     explanation   = local.benchmark_driver_matrix_explanation
     echo_configuration = {
-      benchmark_echo_runs                = var.benchmark_echo_runs
-      benchmark_echo_iterations          = var.benchmark_echo_iterations
-      benchmark_echo_warmup_iterations   = var.benchmark_echo_warmup_iterations
-      benchmark_message_length           = var.benchmark_message_length
-      benchmark_message_rate             = var.benchmark_message_rate
-      run_benchmarks_matrix_modes        = var.run_benchmarks_matrix_modes
-      run_benchmarks_cluster_matrix      = var.run_benchmarks_cluster_matrix && var.enable_failover_node
+      benchmark_echo_runs              = var.benchmark_echo_runs
+      benchmark_echo_iterations        = var.benchmark_echo_iterations
+      benchmark_echo_warmup_iterations = var.benchmark_echo_warmup_iterations
+      benchmark_message_length         = var.benchmark_message_length
+      benchmark_message_rate           = var.benchmark_message_rate
+      run_smoke_test                   = var.run_smoke_test
+      run_full_benchmark               = var.run_full_benchmark
+      run_benchmarks_matrix_modes      = var.run_benchmarks_matrix_modes
+      run_benchmarks_cluster_matrix    = var.run_benchmarks_cluster_matrix && var.enable_failover_node
+      benchmark_vma_apply_setcap       = var.benchmark_vma_apply_setcap
+      benchmark_vma_lib_path           = var.benchmark_vma_lib_path
+      benchmark_install_vma_runtime    = var.benchmark_install_vma_runtime
+      benchmark_vma_build_from_source  = var.benchmark_vma_build_from_source
+      benchmark_vma_git_ref            = var.benchmark_vma_git_ref
     }
     results_on_controller = "/home/${var.ssh_username}/benchmark-results"
-    pull_enabled          = var.pull_matrix_summary_for_terraform_output
-  }
-}
-
-output "benchmark_driver_matrix_summary" {
-  description = "Full JSON from the last matrix pull: echo_mode_status / cluster_mode_status (per-driver ok|failed), echo_modes / cluster_modes (latency medians per scenario), matrix_profile, and benchmark_echo_* counts. When pull_matrix_summary_for_terraform_output=true and SSH+python pull succeeded; otherwise null or stub with _pull_failed. Same apply ordering as benchmark_driver_matrix_smoke."
-  depends_on = [
-    null_resource.run_driver_matrix,
-    null_resource.benchmark_matrix_summary_pull,
-  ]
-  value = local.terraform_matrix_summary_json
-}
-
-output "benchmark_driver_matrix_smoke" {
-  description = "Convenience view of smoke/extended matrix results for terraform output: per-mode matrix status (java/c/java_vma/c_vma) and aggregated latency rows. Null keys when .terraform-matrix-summary.json is missing or pull failed (_pull_failed in full summary)."
-  depends_on = [
-    null_resource.run_driver_matrix,
-    null_resource.benchmark_matrix_summary_pull,
-  ]
-  value = local.terraform_matrix_summary_json == null ? null : {
-    pull_failed = try(local.terraform_matrix_summary_json["_pull_failed"], false)
-    errors      = try(local.terraform_matrix_summary_json["errors"], null)
-    matrix_profile = try(local.terraform_matrix_summary_json["matrix_profile"], null)
-    echo_mode_status    = try(local.terraform_matrix_summary_json["echo_mode_status"], [])
-    echo_latencies      = try(local.terraform_matrix_summary_json["echo_modes"], [])
-    cluster_mode_status = try(local.terraform_matrix_summary_json["cluster_mode_status"], [])
-    cluster_latencies   = try(local.terraform_matrix_summary_json["cluster_modes"], [])
   }
 }

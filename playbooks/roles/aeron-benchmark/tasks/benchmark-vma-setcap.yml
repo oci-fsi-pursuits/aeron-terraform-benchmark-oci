@@ -1,0 +1,37 @@
+---
+# Mellanox VMA often needs CAP_NET_RAW on Java and aeronmd. See vma-ansible-handoff.
+
+- name: Ensure libcap2-bin for setcap (Debian/Ubuntu)
+  ansible.builtin.apt:
+    name: libcap2-bin
+    state: present
+    lock_timeout: 600
+  when: ansible_os_family == "Debian"
+
+- name: Ensure libcap for setcap (RedHat family)
+  ansible.builtin.dnf:
+    name: libcap
+    state: present
+  when: ansible_os_family == "RedHat"
+
+- name: Apply cap_net_raw+ep to Java and native Aeron media drivers (VMA)
+  ansible.builtin.shell: |
+    set -euo pipefail
+    for J in "/usr/lib/jvm/java-{{ java_version }}-openjdk-amd64/bin/java" "/usr/lib/jvm/java-{{ java_version }}-openjdk/bin/java"; do
+      if [[ -f "$J" ]]; then
+        setcap cap_net_raw+ep "$J"
+        break
+      fi
+    done
+    for A in \
+      "{{ benchmarks_dist_path }}/scripts/aeron/aeronmd" \
+      "{{ benchmarks_dist_path }}/scripts/aeron/c-media-driver" \
+      "{{ benchmarks_dist_path }}/scripts/aeron/c-aeronmd"; do
+      if [[ -f "$A" ]]; then
+        setcap cap_net_raw+ep "$A"
+      fi
+    done
+  args:
+    executable: /bin/bash
+  become: true
+  changed_when: true

@@ -4,6 +4,7 @@
 # On controller: builds aeron-io/benchmarks (deployTar), deploys to benchmark nodes, installs wrappers.
 - name: Aeron Deployment
   hosts: all
+  gather_facts: true
   become: true
   roles:
     - role: aeron-install

@@ -1,0 +1,22 @@
+--- a/scripts/remote-benchmarks-runner
++++ b/scripts/remote-benchmarks-runner
+@@ -243,12 +243,16 @@ function execute_remote_command()
+ {
+   local sshUser=${1}
+   local sshKeyFile=${2}
+   local server=${3}
++  set +x
+   local command=${4}
+-  ssh -i "${sshKeyFile}" \
++  printf '%s\n' "${command}" | ssh -i "${sshKeyFile}" \
+    -o StrictHostKeyChecking=no \
+    -o ConnectionAttempts="${sshConnectionAttempts}" \
+    -o ConnectTimeout="${sshConnectTimeout}" \
+    -o ServerAliveInterval="${sshServerAliveInterval}" \
+    "${sshUser}"@"${server}" \
+-   "${command}"
++   "exec bash --norc -s"
++  local _erc=$?
++  set -x
++  return $_erc
+ }

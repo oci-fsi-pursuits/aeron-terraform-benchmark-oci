@@ -20,7 +20,26 @@ This node is the **controller/orchestrator** for the Aeron benchmark stack.
 - **Receiver** (second benchmark node): `{{ receiver_node_ip | default('not provided') }}` — **`{{ aeron_benchmark_receiver_hostname }}`**
 - `failover` (optional): `{{ failover_node_ip | default('not enabled') }}`{% if (failover_node_ip | default('') | trim) %} — **`{{ aeron_benchmark_failover_hostname }}`**{% endif %}
 
-Wrappers and `benchmark-config.env` use the **stable hostnames** above for SSH and Aeron UDP endpoints so you can refresh instances without editing channel strings (re-run apply so Ansible rewrites `/etc/hosts` and config).
+Wrappers and `benchmark-config.env` use the **stable hostnames** above for SSH. When cloud-init RDMA is enabled, Aeron UDP endpoints use the derived RDMA fabric IPs instead, for example `10.34.1.234` becomes `10.34.100.234` on `eth1`.
+
+{% if (benchmark_cloud_init_rdma | default(false) | bool) %}
+## RDMA fabric
+
+- RDMA cloud-init: enabled
+- RDMA interface: `{{ benchmark_cloud_init_rdma_interface | default('eth1') }}`
+- RDMA IPv4 prefix: `{{ benchmark_cloud_init_rdma_ipv4_prefix | default('') }}/{{ benchmark_cloud_init_rdma_prefix_length | default(24) }}`
+- Expected client RDMA IP: `{% if (client_node_ip | default('') | trim) and (benchmark_cloud_init_rdma_ipv4_prefix | default('') | trim) %}{{ benchmark_cloud_init_rdma_ipv4_prefix }}.{{ (client_node_ip | trim).split('.') | last }}{% else %}not derived{% endif %}`
+- Expected receiver RDMA IP: `{% if (receiver_node_ip | default('') | trim) and (benchmark_cloud_init_rdma_ipv4_prefix | default('') | trim) %}{{ benchmark_cloud_init_rdma_ipv4_prefix }}.{{ (receiver_node_ip | trim).split('.') | last }}{% else %}not derived{% endif %}`
+
+Quick checks from each benchmark node:
+
+```bash
+ip -br addr show {{ benchmark_cloud_init_rdma_interface | default('eth1') }}
+rdma link || true
+ibv_devices || true
+ls -la /sys/class/infiniband
+```
+{% endif %}
 
 ## Node naming convention
 
@@ -79,7 +98,7 @@ Run echo matrix (all default modes):
 
 ```bash
 CONFIG_FILE=./config/benchmark-config.env \
-MATRIX_MODES="{{ run_benchmarks_matrix_modes | default('java,java_vma,c,c_vma') }}" \
+MATRIX_MODES="{{ run_benchmarks_matrix_modes | default('java,c') }}" \
 ./run-driver-matrix.sh echo
 ```
 
@@ -103,6 +122,18 @@ If failover/cluster is enabled, run cluster matrix:
 CONFIG_FILE=./config/benchmark-config.env MATRIX_MODES="java,c" ./run-driver-matrix.sh cluster
 ```
 
+## Consolidate several matrix summaries (histogram CSVs)
+
+After long echo + cluster runs with custom `SUMMARY_FILE` paths under `/home/{{ ssh_username | default('ubuntu') }}/benchmark-results`, merge them:
+
+```bash
+export SUMMARY_FILES="driver-matrix-echo-summary-my-run.csv,driver-matrix-cluster-summary-my-run.csv"
+export OUTPUT_PREFIX="my-run-histograms"
+/opt/aeron/scripts/generate-benchmark-summary-csvs.sh
+```
+
+Produces `*-all.csv` and `*-best-of-all.csv` with columns `patterns,p50,p99,p999,p9999,max` in the same results directory.
+
 ## Change benchmark configuration
 
 Primary config file:
@@ -120,7 +151,7 @@ cp -f {{ aeron_dir }}/scripts/config/benchmark-config.env {{ benchmarks_dist_pat
 Applied tuning targets:
 
 - Hyperthreading preference: `{{ hyperthreading | default(false) }}`
-- Socket buffers (`rmem_max`, `wmem_max`): `{{ socket_buf | default('4194304') }}`
+- Socket buffers (`rmem_max`, `wmem_max`): `{{ socket_buf_max | default(socket_buf | default('33554432')) }}`
 - CPU pinning defaults:
   - Housekeeping CPUs: `{{ housekeeping_cpus | default('0-1') }}`
   - Isolated CPUs target: `{{ isolated_cpus | default('2-9') }}`

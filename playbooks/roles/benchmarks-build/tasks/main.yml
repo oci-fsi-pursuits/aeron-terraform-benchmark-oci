@@ -15,6 +15,9 @@
     version: "{{ benchmarks_git_branch | default('master', true) }}"
     force: yes
   register: benchmarks_clone
+  until: benchmarks_clone is succeeded
+  retries: 6
+  delay: 20
   when: node_role | default('') == 'controller'
 
 - name: Check if benchmarks tar exists
@@ -23,15 +26,28 @@
   register: benchmarks_tar_stat
   when: node_role | default('') == 'controller'
 
+- name: Increase benchmarks Gradle wrapper network timeout
+  lineinfile:
+    path: "{{ aeron_dir }}/benchmarks-src/gradle/wrapper/gradle-wrapper.properties"
+    regexp: '^networkTimeout='
+    line: "networkTimeout={{ gradle_wrapper_network_timeout_ms | default(120000) }}"
+    create: false
+  when: node_role | default('') == 'controller' and (benchmarks_clone.changed | default(true) or force_rebuild | default(false) or not (benchmarks_tar_stat.stat.exists | default(false)))
+
 - name: Build benchmarks distribution (deployTar)
   shell: |
-    set -e
+    set -euo pipefail
     export JAVA_HOME=/usr/lib/jvm/java-{{ java_version }}-openjdk-amd64
-    ./gradlew clean deployTar
+    ./gradlew --no-daemon clean deployTar
   args:
     chdir: "{{ aeron_dir }}/benchmarks-src"
+    executable: /bin/bash
   environment:
     JAVA_HOME: "/usr/lib/jvm/java-{{ java_version }}-openjdk-amd64"
+  register: benchmarks_gradle_build
+  until: benchmarks_gradle_build is succeeded
+  retries: "{{ gradle_build_retries | default(4) }}"
+  delay: "{{ gradle_build_retry_delay_sec | default(30) }}"
   when: node_role | default('') == 'controller' and (benchmarks_clone.changed | default(true) or force_rebuild | default(false) or not (benchmarks_tar_stat.stat.exists | default(false)))
 
 - name: Re-check if benchmarks tar exists after build
@@ -90,6 +106,7 @@
       - gnupg
     state: present
     update_cache: yes
+    lock_timeout: 600
   when:
     - node_role | default('') == 'controller'
     - ansible_os_family == 'Debian'
@@ -119,7 +136,9 @@
       - zlib1g-dev
       - libssl-dev
       - pkg-config
+      - patchelf
     state: present
+    lock_timeout: 600
   when:
     - node_role | default('') == 'controller'
     - ansible_os_family == 'Debian'
@@ -130,6 +149,7 @@
   apt:
     name: cmake
     state: latest
+    lock_timeout: 600
   when:
     - node_role | default('') == 'controller'
     - ansible_os_family == 'Debian'
@@ -148,8 +168,10 @@
     cd "$BUILD_DIR"
     if [ ! -x binaries/aeronmd ] || [ "${FORCE_REBUILD}" = "1" ]; then
       cmake -DCMAKE_BUILD_TYPE=Release ../..
-      if ! cmake --build . --parallel "$(nproc)" --target aeronmd; then
-        echo "Note: target aeronmd missing or failed; building default targets" >&2
+      # aeronmd links libaeron_driver.so; building only the aeronmd target can omit the shared driver
+      # artifact from some CMake layouts, leaving c/c_vma broken on synced nodes (ld.so: libaeron_driver.so missing).
+      if ! cmake --build . --parallel "$(nproc)" --target aeron_driver aeronmd; then
+        echo "Note: target aeron_driver/aeronmd missing or failed; building default targets" >&2
         cmake --build . --parallel "$(nproc)"
       fi
     fi
@@ -164,15 +186,46 @@
       exit 1
     fi
     mkdir -p "$DEST_DIR"
+    # Upstream CMake sets INSTALL_RPATH "$ORIGIN/../lib" on aeronmd — loader looks under scripts/lib/, not only scripts/aeron/.
+    LIB_DIR="$(dirname "$DEST_DIR")/lib"
+    mkdir -p "$LIB_DIR"
     install -m 0755 "${AMD}" "$DEST"
     shopt -s nullglob
-    for so in binaries/*.so; do
-      install -m 0755 "$so" "$DEST_DIR/"
-    done
-    # aeronmd dlopens libaeron_driver.so; CMake often places it under lib/ or lib64/, not binaries/
+    # Dereference build-tree symlinks (cp -L) so tar|ssh nodes do not keep broken relative links into cppbuild/.
+    _install_aeron_libs() {
+      local dest="$1"
+      while IFS= read -r -d '' so; do
+        b="$(basename "$so")"
+        cp -L "$so" "$dest/$b"
+      done < <(find "$BUILD_DIR" \( -name 'libaeron*.so' -o -name 'libaeron*.so.*' \) \
+        ! -path '*/CMakeFiles/*' \( -type f -o -type l \) -print0 2>/dev/null)
+      for so in "$BUILD_DIR"/binaries/*.so; do
+        [ -e "$so" ] || continue
+        cp -L "$so" "$dest/$(basename "$so")"
+      done
+    }
+    _install_aeron_libs "$DEST_DIR"
+    _install_aeron_libs "$LIB_DIR"
+    # Explicit libaeron_driver.so* copy: generic libaeron*.so find can miss driver-only outputs or versioned SONAME paths.
     while IFS= read -r -d '' so; do
-      install -m 0755 "$so" "$DEST_DIR/$(basename "$so")"
-    done < <(find "$BUILD_DIR" -type f \( -name 'libaeron*.so' -o -name 'libaeron*.so.*' \) -print0 2>/dev/null)
+      b="$(basename "$so")"
+      cp -L "$so" "$LIB_DIR/$b"
+      cp -L "$so" "$DEST_DIR/$b"
+    done < <(find "$BUILD_DIR" \( -name 'libaeron_driver.so' -o -name 'libaeron_driver.so.*' \) \
+      ! -path '*/CMakeFiles/*' \( -type f -o -type l \) -print0 2>/dev/null)
+    # Dev-tree link embeds an absolute RPATH to cppbuild/.../lib — fine on the controller, missing on benchmark VMs.
+    # VMA setcap(cap_net_raw+ep) on aeronmd makes ld.so ignore LD_LIBRARY_PATH; only ELF RPATH/RUNPATH applies.
+    patchelf --remove-rpath "$DEST" 2>/dev/null || true
+    patchelf --set-rpath '$ORIGIN:$ORIGIN/../lib' "$DEST"
+    # Validate without LD_LIBRARY_PATH (matches setcap + native exec on benchmark nodes).
+    _aeron_missing="$(env -u LD_LIBRARY_PATH ldd "$DEST" 2>&1 | grep -E 'libaeron.*=> not found' || true)"
+    if [ -n "${_aeron_missing}" ]; then
+      echo "aeronmd: Aeron libs missing for DT_RPATH "'$ORIGIN/../lib'" -> ${LIB_DIR}" >&2
+      echo "${_aeron_missing}" >&2
+      env -u LD_LIBRARY_PATH ldd "$DEST" || true
+      ls -la "$LIB_DIR"/libaeron* "$DEST_DIR"/libaeron* 2>/dev/null || true
+      exit 1
+    fi
   args:
     executable: /bin/bash
   environment:
@@ -266,33 +319,316 @@
     executable: /bin/bash
   when: node_role | default('') == 'controller'
 
+# OpenSSH runs the remote argv with /bin/sh (dash on Ubuntu). Echo/cluster payloads need bash for job control.
+# Feed the remote script on stdin so we never rely on dash parsing multi-hundred-char `ssh … "…"` one-liners.
+# The runner uses `set -x`: tracing `local command=${4}` emits a huge line and can kill Terraform's controller SSH
+# session — mute xtrace around that assignment and propagate ssh exit status. Applied via unified diff (patch(1)),
+# not ad-hoc regex in Python.
+- name: Ensure benchmarks patch staging directory exists (controller)
+  file:
+    path: "{{ aeron_dir }}/.benchmarks-patches"
+    state: directory
+    mode: '0755'
+  when: node_role | default('') == 'controller'
+
+- name: Stage execute_remote patch for remote-benchmarks-runner
+  ansible.builtin.copy:
+    src: patches/remote-benchmarks-runner-execute_remote.patch
+    dest: "{{ aeron_dir }}/.benchmarks-patches/remote-benchmarks-runner-execute_remote.patch"
+    mode: '0644'
+  when: node_role | default('') == 'controller'
+
+- name: Patch remote-benchmarks-runner remote transport function
+  ansible.builtin.replace:
+    path: "{{ benchmarks_dist_path }}/scripts/remote-benchmarks-runner"
+    regexp: '(?ms)^function execute_remote_command\(\)\s*\n\{.*?^\}'
+    replace: |-
+      function execute_remote_command()
+      {
+        local sshUser=${1}
+        local sshKeyFile=${2}
+        local server=${3}
+        set +x
+        local command=${4}
+        printf '%s\n' "${command}" | ssh -i "${sshKeyFile}" \
+         -o StrictHostKeyChecking=no \
+         -o ConnectionAttempts="${sshConnectionAttempts}" \
+         -o ConnectTimeout="${sshConnectTimeout}" \
+         -o ServerAliveInterval="${sshServerAliveInterval}" \
+         "${sshUser}"@"${server}" \
+         "exec bash --norc -s"
+        local _erc=$?
+        set -x
+        return $_erc
+      }
+  when: node_role | default('') == 'controller'
+
+# cgroup/cpuset can make taskset fail; warn instead of aborting the whole benchmark (VMA / cloud).
+- name: Soften taskset failures in remote-benchmarks-runner (warn and continue)
+  ansible.builtin.replace:
+    path: "{{ benchmarks_dist_path }}/scripts/remote-benchmarks-runner"
+    regexp: '(?m)^(?!.*\|\|)(\s*taskset\s+-p\s+-c.*\$\{tid\}.*)$'
+    replace: '\1 || true'
+  when: node_role | default('') == 'controller'
+
+# VMA/root launches can delay or rename JVM benchmark threads enough that the upstream helper aborts before
+# the benchmark starts. Missing a pin is noisy but non-fatal; keep the command chain syntactically complete.
+- name: Soften missing thread-pin lookup in remote-benchmarks-runner
+  ansible.builtin.replace:
+    path: "{{ benchmarks_dist_path }}/scripts/remote-benchmarks-runner"
+    regexp: |-
+      (?m)^(\s*)if \[ -z \\\"\$\\\{tid\\\}\\\" \]; then
+      \1  echo 'Timeout: thread \$\{thread_name\} not found after 60 seconds.';
+      \1  exit 1;
+      \1fi;
+      \1echo \\\"tid_\$\{thread_name\}='\\\$\{tid\}'\\\";
+      \1taskset -p -c \$\{core\} \\\$\{tid\}(?: \|\| true)?
+    replace: |-
+      \1if [ -z \"\${tid}\" ]; then
+      \1  echo 'Warning: thread ${thread_name} not found after 60 seconds; continuing without pin.';
+      \1else
+      \1  echo \"tid_${thread_name}='\${tid}'\";
+      \1  taskset -p -c ${core} \${tid} || true;
+      \1  if [ -n \"${AERON_RT_PRIORITY:-}\" ]; then
+      \1    sudo chrt -f -p ${AERON_RT_PRIORITY} \${tid} || true;
+      \1  fi;
+      \1fi;
+      \1true
+  when: node_role | default('') == 'controller'
+
+# Keep the server-side background process from holding the SSH channel open through inherited stdin.
+- name: Detach remote benchmark server launch from SSH stdin
+  ansible.builtin.replace:
+    path: "{{ benchmarks_dist_path }}/scripts/remote-benchmarks-runner"
+    regexp: '\(\$\{jvm_opts\} && \$\{server_start_command\} &\) > /tmp/benchmarks-server\.log 2>&1; true; exit'
+    replace: '(${jvm_opts} && ${server_start_command}) > /tmp/benchmarks-server.log 2>&1 </dev/null & true; exit'
+  when: node_role | default('') == 'controller'
+
 # procps pgrep -x '^aeronmd$' often misses the running binary (seen as Timeout on c_vma); pidof uses kernel comm.
 - name: Use pidof for native aeronmd await in remote-benchmarks-helper
+  ansible.builtin.replace:
+    path: "{{ benchmarks_dist_path }}/scripts/aeron/remote-benchmarks-helper"
+    regexp: "{{ item.old | regex_escape }}"
+    replace: "{{ item.new }}"
+  loop: "{{ benchmarks_helper_pidof_substitutions }}"
+  vars:
+    benchmarks_helper_pidof_substitutions:
+      - old: |-
+          \$(pgrep -x '^aeronmd\$')
+        new: |-
+          \$(pidof -s aeronmd 2>/dev/null || pgrep -n -x aeronmd 2>/dev/null || pgrep -n -f low-latency-driver.properties 2>/dev/null || pgrep -n -f benchmark.properties 2>/dev/null)
+      - old: |-
+          \$(pgrep -x '^aeronmd_dpdk\$')
+        new: |-
+          \$(pidof -s aeronmd_dpdk 2>/dev/null || pgrep -n -x aeronmd_dpdk 2>/dev/null)
+      - old: '$(pgrep -x ^aeronmd)'
+        new: '$(pidof -s aeronmd 2>/dev/null || pgrep -n -x aeronmd 2>/dev/null || pgrep -n -f low-latency-driver.properties 2>/dev/null || pgrep -n -f benchmark.properties 2>/dev/null)'
+      - old: '$(pgrep -x ^aeronmd_dpdk)'
+        new: '$(pidof -s aeronmd_dpdk 2>/dev/null || pgrep -n -x aeronmd_dpdk 2>/dev/null)'
+      - old: |-
+          \$(pgrep -x '^aeronmd$')
+        new: |-
+          \$(pidof -s aeronmd 2>/dev/null || pgrep -n -x aeronmd 2>/dev/null || pgrep -n -f low-latency-driver.properties 2>/dev/null || pgrep -n -f benchmark.properties 2>/dev/null)
+      - old: |-
+          \$(pgrep -x '^aeronmd_dpdk$')
+        new: |-
+          \$(pidof -s aeronmd_dpdk 2>/dev/null || pgrep -n -x aeronmd_dpdk 2>/dev/null)
+  when: node_role | default('') == 'controller'
+
+- name: Verify remote-benchmarks-helper references pidof for aeronmd await
   ansible.builtin.shell: |
     set -euo pipefail
     H="{{ benchmarks_dist_path }}/scripts/aeron/remote-benchmarks-helper"
-    test -f "$H"
-    export BENCH_HELPER="$H"
-    python3 <<'PY'
-    import pathlib, os
-    p = pathlib.Path(os.environ["BENCH_HELPER"])
-    t = p.read_text()
-    subs = (
-        # Escaped $() as stored in some upstream helpers
-        ("\\$(pgrep -x '^aeronmd\\$')", "\\$(pidof -s aeronmd 2>/dev/null || pgrep -x aeronmd 2>/dev/null | head -n1)"),
-        ("\\$(pgrep -x '^aeronmd_dpdk\\$')", "\\$(pidof -s aeronmd_dpdk 2>/dev/null || pgrep -x aeronmd_dpdk 2>/dev/null | head -n1)"),
-        # Unescaped anchors (seen in timeout messages: pgrep -x ^aeronmd)
-        ("$(pgrep -x ^aeronmd)", "$(pidof -s aeronmd 2>/dev/null || pgrep -x aeronmd 2>/dev/null | head -n1)"),
-        ("$(pgrep -x ^aeronmd_dpdk)", "$(pidof -s aeronmd_dpdk 2>/dev/null || pgrep -x aeronmd_dpdk 2>/dev/null | head -n1)"),
-        ("\\$(pgrep -x '^aeronmd$')", "\\$(pidof -s aeronmd 2>/dev/null || pgrep -x aeronmd 2>/dev/null | head -n1)"),
-        ("\\$(pgrep -x '^aeronmd_dpdk$')", "\\$(pidof -s aeronmd_dpdk 2>/dev/null || pgrep -x aeronmd_dpdk 2>/dev/null | head -n1)"),
+    grep -q 'pidof -s aeronmd' "$H"
+  args:
+    executable: /bin/bash
+  when: node_role | default('') == 'controller'
+
+# Native aeronmd can be launched through the ELF loader, so the process name may be ld-linux-x86-64
+# rather than aeronmd. Match the command line too, otherwise repeated c/c_vma runs can leave stale drivers.
+- name: Kill loader-launched native aeronmd during benchmark cleanup
+  ansible.builtin.replace:
+    path: "{{ benchmarks_dist_path }}/scripts/aeron/remote-benchmarks-helper"
+    regexp: "sudo pkill -SIGTERM '\\^aeronmd';"
+    replace: "sudo pkill -SIGTERM '^aeronmd' 2>/dev/null || true; sudo pkill -f '[/]aeronmd .*benchmark[.]properties' 2>/dev/null || true;"
+  when: node_role | default('') == 'controller'
+
+# Native c/c_vma launches aeronmd through c-media-driver, often under numactl and optionally LD_PRELOAD=libvma.
+# Some cloud VM paths can still lose libaeron_driver.so even after RUNPATH patching, so invoke the ELF loader
+# explicitly with the dist lib directories. This keeps c and c_vma independent of shell LD_LIBRARY_PATH quirks.
+- name: Harden c-media-driver native library lookup
+  ansible.builtin.shell: |
+    set -euo pipefail
+    C="{{ benchmarks_dist_path }}/scripts/aeron/c-media-driver"
+    test -f "$C"
+    grep -q 'AERON_LD_SO' "$C" && exit 0
+    python3 - "$C" <<'PY'
+    from pathlib import Path
+    import sys
+
+    path = Path(sys.argv[1])
+    text = path.read_text()
+    old = '''exec "${DIR}/aeronmd" \\
+      "${DIR}/low-latency-driver.properties" \\
+      "${DIR}/benchmark.properties" \\
+      "$@"
+    '''
+    new = '''AERON_LD_SO=""
+    for candidate in /lib64/ld-linux-x86-64.so.2 /lib/x86_64-linux-gnu/ld-linux-x86-64.so.2; do
+      if [[ -x "${candidate}" ]]; then
+        AERON_LD_SO="${candidate}"
+        break
+      fi
+    done
+
+    if [[ -n "${AERON_LD_SO}" ]]; then
+      exec "${AERON_LD_SO}" \\
+        --library-path "${DIR}:${DIR}/../lib:${LD_LIBRARY_PATH:-}" \\
+        "${DIR}/aeronmd" \\
+        "${DIR}/low-latency-driver.properties" \\
+        "${DIR}/benchmark.properties" \\
+        "$@"
+    fi
+
+    exec "${DIR}/aeronmd" \\
+      "${DIR}/low-latency-driver.properties" \\
+      "${DIR}/benchmark.properties" \\
+      "$@"
+    '''
+    if old not in text:
+      raise SystemExit("expected c-media-driver exec block not found")
+    path.write_text(text.replace(old, new))
+    PY
+  args:
+    executable: /bin/bash
+  when: node_role | default('') == 'controller'
+
+- name: Install VMA /dev/shm ownership fixup helper
+  ansible.builtin.copy:
+    dest: "{{ benchmarks_dist_path }}/scripts/aeron/aeron-vma-shm-fixup.sh"
+    mode: '0755'
+    content: |
+      #!/usr/bin/env bash
+      set -euo pipefail
+
+      _aeron_shm_user="${AERON_SHM_USER:-{{ ssh_username | default('ubuntu') }}}"
+      _aeron_dir="${AERON_DIR:-/dev/shm/aeron}"
+      _interval="${AERON_SHM_FIXUP_INTERVAL_SEC:-0.5}"
+
+      if [[ "$(id -u)" -ne 0 ]]; then
+        exit 0
+      fi
+
+      mkdir -p "${_aeron_dir}" 2>/dev/null || true
+      chown -R "${_aeron_shm_user}:${_aeron_shm_user}" "${_aeron_dir}" 2>/dev/null || true
+
+      _parent_pid="$$"
+      (
+        while kill -0 "${_parent_pid}" 2>/dev/null; do
+          find "${_aeron_dir}" -xdev -user root -exec chown "${_aeron_shm_user}:${_aeron_shm_user}" {} + 2>/dev/null || true
+          sleep "${_interval}"
+        done
+      ) &
+      export AERON_SHM_FIXUP_PID="$!"
+  when: node_role | default('') == 'controller'
+
+- name: Source VMA /dev/shm fixup from media driver launchers
+  ansible.builtin.shell: |
+    set -euo pipefail
+    python3 - "{{ benchmarks_dist_path }}/scripts/aeron/c-media-driver" "{{ benchmarks_dist_path }}/scripts/aeron/media-driver" <<'PY'
+    from pathlib import Path
+    import sys
+
+    snippet = '''\
+    if [[ -n "${LD_PRELOAD:-}" && -f "${DIR}/aeron-vma-shm-fixup.sh" ]]; then
+      # shellcheck source=/dev/null
+      source "${DIR}/aeron-vma-shm-fixup.sh"
+    fi
+
+    '''
+
+    for raw in sys.argv[1:]:
+      path = Path(raw)
+      if not path.exists():
+        continue
+      text = path.read_text()
+      if "aeron-vma-shm-fixup.sh" in text:
+        continue
+      marker = 'DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"\n'
+      if marker not in text:
+        raise SystemExit(f"{path}: DIR marker not found")
+      path.write_text(text.replace(marker, marker + "\n" + snippet, 1))
+    PY
+  args:
+    executable: /bin/bash
+  when: node_role | default('') == 'controller'
+
+- name: Route cluster java-onload through native c-media-driver for VMA
+  ansible.builtin.shell: |
+    set -euo pipefail
+    R="{{ benchmarks_dist_path }}/scripts/aeron/remote-cluster-benchmarks"
+    test -f "$R"
+    python3 - "$R" <<'PY'
+    from pathlib import Path
+    import re
+    import sys
+
+    path = Path(sys.argv[1])
+    text = path.read_text()
+    pattern = re.compile(
+        r"(drivers\['java-onload'\]\s*=\s*\".*?start_media_driver\s+\"\$\{scripts_path\}/)media-driver(\" \"\$\{onload\}\".*?\")",
+        re.S,
     )
-    orig = t
-    for old, new in subs:
-        t = t.replace(old, new)
-    if t == orig:
-        raise SystemExit("remote-benchmarks-helper: expected pgrep aeronmd snippet not found (upstream layout changed?)")
-    p.write_text(t)
+    new, count = pattern.subn(r"\1c-media-driver\2", text, count=1)
+    if count == 0:
+      if "drivers['java-onload']" in text and '${scripts_path}/c-media-driver" "${onload}"' in text:
+        raise SystemExit(0)
+      raise SystemExit("remote-cluster-benchmarks: expected java-onload media-driver block not found")
+    path.write_text(new)
+    PY
+    grep -A4 "drivers\['java-onload'\]" "$R" | grep -q 'c-media-driver'
+  args:
+    executable: /bin/bash
+  when: node_role | default('') == 'controller'
+
+- name: Add optional drop_caches between cluster benchmark runs
+  ansible.builtin.shell: |
+    set -euo pipefail
+    R="{{ benchmarks_dist_path }}/scripts/aeron/remote-cluster-benchmarks"
+    test -f "$R"
+    python3 - "$R" <<'PY'
+    from pathlib import Path
+    import sys
+
+    path = Path(sys.argv[1])
+    text = path.read_text()
+    marker = 'echo -e "\\n\\033[1;32m### [$(date +"%Y-%m-%d %H:%M:%S")] Benchmark run #${run} ...\\033[0m\\n"\n'
+    if "CLUSTER_SKIP_DROP_CACHES" in text:
+      raise SystemExit(0)
+    if marker not in text:
+      raise SystemExit("remote-cluster-benchmarks: benchmark run marker not found")
+    insert = marker + r'''
+            if [[ "${CLUSTER_SKIP_DROP_CACHES:-1}" != "1" ]]; then
+              echo -e "\nDropping page cache on cluster hosts..."
+              execute_remote_command "${SSH_CLIENT_USER}" "${SSH_CLIENT_KEY_FILE}" "${SSH_CLIENT_NODE}" "sync; sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches' || true; exit"
+              for (( n=0; n<CLUSTER_SIZE; n++ ))
+              do
+                ssh_user=SSH_CLUSTER_USER${n}
+                ssh_key_file=SSH_CLUSTER_KEY_FILE${n}
+                ssh_node=SSH_CLUSTER_NODE${n}
+                execute_remote_command "${!ssh_user}" "${!ssh_key_file}" "${!ssh_node}" "sync; sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches' || true; exit"
+              done
+              for (( n=0; n<CLUSTER_BACKUP_NODES; n++ ))
+              do
+                ssh_user=SSH_CLUSTER_BACKUP_USER${n}
+                ssh_key_file=SSH_CLUSTER_BACKUP_KEY_FILE${n}
+                ssh_node=SSH_CLUSTER_BACKUP_NODE${n}
+                execute_remote_command "${!ssh_user}" "${!ssh_key_file}" "${!ssh_node}" "sync; sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches' || true; exit"
+              done
+            fi
+
+    '''
+    path.write_text(text.replace(marker, insert, 1))
     PY
   args:
     executable: /bin/bash
@@ -332,23 +668,23 @@
     executable: /bin/bash
   when: node_role | default('') == 'controller'
 
-# Deploy benchmarks-dist to benchmark nodes so they can run echo/server side.
-# Also push to failover when present — remote-cluster-benchmarks runs backup node commands on that host.
-- name: Deploy benchmarks-dist to benchmark nodes
+- name: Fix backup consensus endpoints in remote-cluster-benchmarks
   shell: |
-    set -e
-    KEY="{{ aeron_dir }}/.ssh/deploy_key"
-    IPS="{{ benchmark_node_ips | default('') }}"
-    {% if failover_node_ip is defined and (failover_node_ip | default('') | trim | length > 0) %}
-    IPS="${IPS},{{ failover_node_ip | trim }}"
-    {% endif %}
-    for ip in $(echo "$IPS" | tr ',' ' '); do
-      [ -z "$ip" ] && continue
-      tar -C "{{ benchmarks_dist_path }}" -czf - . | ssh -i "$KEY" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "{{ ssh_username | default('ubuntu') }}@$ip" \
-        "sudo rm -rf '{{ benchmarks_dist_path }}' && sudo mkdir -p '{{ benchmarks_dist_path }}' && sudo tar -xzf - -C '{{ benchmarks_dist_path }}' && sudo chown -R {{ ssh_username | default('ubuntu') }}:{{ ssh_username | default('ubuntu') }} '{{ benchmarks_dist_path }}'"
-    done
-  when:
-    - node_role | default('') == 'controller'
-    - benchmark_node_ips is defined
-    - benchmark_node_ips | default('') | length > 0
-  changed_when: true
+    set -euo pipefail
+    R="{{ benchmarks_dist_path }}/scripts/aeron/remote-cluster-benchmarks"
+    test -f "$R"
+    if grep -Fq -- '-Daeron.cluster.consensus.endpoints=${CLUSTER_BACKUP_CONSENSUS_ENDPOINTS:-${CLUSTER_CONSENSUS_ENDPOINTS}}' "$R"; then
+      echo "remote-cluster-benchmarks: backup consensus endpoint patch already applied"
+      exit 0
+    fi
+    if ! grep -Fq -- '-Daeron.cluster.consensus.endpoints=${CLUSTER_CONSENSUS_ENDPOINTS}' "$R"; then
+      echo "remote-cluster-benchmarks: expected backup consensus endpoint line not found (upstream changed?)" >&2
+      exit 1
+    fi
+    perl -0pi -e 's/(-Daeron\.cluster\.consensus\.channel=\$\{!cluster_consensus_channel_var\} \\\s*)-Daeron\.cluster\.consensus\.endpoints=\$\{CLUSTER_CONSENSUS_ENDPOINTS\}/$1-Daeron.cluster.consensus.endpoints=\${CLUSTER_BACKUP_CONSENSUS_ENDPOINTS:-\${CLUSTER_CONSENSUS_ENDPOINTS}}/' "$R"
+  args:
+    executable: /bin/bash
+  when: node_role | default('') == 'controller'
+
+# benchmarks-dist is synced to benchmark nodes from the aeron-benchmark role after controller-side
+# overlays (wrappers, benchmark-config.env). See benchmarks-dist-sync-to-nodes.yml.

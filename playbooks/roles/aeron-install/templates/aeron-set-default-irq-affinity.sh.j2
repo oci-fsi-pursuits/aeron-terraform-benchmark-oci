@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# Set /proc/irq/default_smp_affinity to the managed Aeron housekeeping CPU list.
+set -euo pipefail
+HK_CPUS_FILE="{{ aeron_dir }}/housekeeping-cpus"
+HK_LAST_FILE="{{ aeron_dir }}/housekeeping-last-cpu"
+if [[ -f "$HK_CPUS_FILE" ]]; then
+  HK_CPUS="$(tr -d '[:space:]' < "$HK_CPUS_FILE" || true)"
+elif [[ -f "$HK_LAST_FILE" ]]; then
+  HK_LAST="$(tr -d '[:space:]' < "$HK_LAST_FILE" || true)"
+  [[ "$HK_LAST" =~ ^[0-9]+$ ]] || exit 0
+  HK_CPUS="0-${HK_LAST}"
+else
+  exit 0
+fi
+[[ -n "$HK_CPUS" ]] || exit 0
+export HK_CPUS
+
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "aeron-set-default-irq-affinity: python3 required for housekeeping list ${HK_CPUS}" >&2
+  exit 1
+fi
+
+python3 <<'PY' > /proc/irq/default_smp_affinity
+import os
+import sys
+
+cpus = set()
+for part in os.environ["HK_CPUS"].split(","):
+    part = part.strip()
+    if not part:
+        continue
+    if "-" in part:
+        start, end = part.split("-", 1)
+        cpus.update(range(int(start), int(end) + 1))
+    else:
+        cpus.add(int(part))
+
+if not cpus:
+    raise SystemExit(0)
+
+max_cpu = max(cpus)
+groups = []
+for group_start in range(0, max_cpu + 1, 32):
+    value = 0
+    for cpu in cpus:
+        if group_start <= cpu < group_start + 32:
+            value |= 1 << (cpu - group_start)
+    groups.append(f"{value:08x}")
+
+sys.stdout.write(",".join(groups))
+PY

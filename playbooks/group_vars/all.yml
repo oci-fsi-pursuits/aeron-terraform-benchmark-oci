@@ -7,13 +7,16 @@ aeron_git_branch: ""
 benchmarks_repo_url: "https://github.com/aeron-io/benchmarks"
 benchmarks_git_branch: ""
 benchmarks_dist_path: "{{ aeron_dir }}/benchmarks-dist"
-# Echo channels: |interface=IP/prefix — use 16 on typical OCI /16 subnets; "" to omit |interface=.
+# Echo channels: |interface=IP/prefix — Terraform apply passes resolved value ("auto" → mask from private_subnet_cidr). Standalone Ansible: set a number or "" to omit |interface=.
 aeron_echo_udp_interface_prefix_length: "24"
 # Aeron 1.50+: |interface={ifname}; set to NIC from `ip -br a` (e.g. enp0s9 on OCI). Terraform -e overrides.
 aeron_echo_udp_named_interface: ""
 java_version: "17"
 hyperthreading: false
 force_rebuild: false
+gradle_wrapper_network_timeout_ms: 120000
+gradle_build_retries: 4
+gradle_build_retry_delay_sec: 30
 
 # ---------------------------------------------------------------------------
 # Benchmark profile (aligned with Aeron quickstart for reproducible results)
@@ -34,22 +37,53 @@ benchmark_build_native_aeronmd: true
 benchmark_ocpus: 10
 # Cluster matrix: auto = probe numactl on receiver over SSH; static = pin from OCPU×threads only
 benchmark_cluster_cpu_affinity: auto
+enable_rdma_compute_cluster: false
+install_oci_cn_auth: false
+benchmark_cloud_init_rdma: false
+benchmark_cloud_init_rdma_interface: eth1
+benchmark_cloud_init_rdma_configure_netplan: true
+benchmark_cloud_init_rdma_ipv4_prefix: ""
+benchmark_cloud_init_rdma_prefix_length: 24
+benchmark_cloud_init_rdma_mtu: 4220
+enable_cluster_raft_consensus: false
+benchmark_tuning_profile: auto
 
-# Socket buffer size in bytes (4MiB recommended for tail latency)
-socket_buf: 4194304
+# Socket buffer limits for high-rate UDP/RDMA fabric tests.
+socket_buf_max: 33554432
+socket_buf_default: 8388608
+# Backward-compatible alias used by older templates.
+socket_buf: "{{ socket_buf_max }}"
 
-# CPU isolation (for nodes with 10+ cores, no-SMT: housekeeping 0-1, isolated 2-9)
+# CPU isolation — defaults for docs; benchmark/failover nodes override via aeron-install facts (e.g. 0-7 / 8-47 when >=9 vCPUs)
 housekeeping_cpus: "0-1"
 isolated_cpus: "2-9"
 irq_affinity: "0-1"
 
-# Aeron latency-first tuning (reduces batching jitter)
+# Benchmark CPU profile. auto preserves the existing dynamic path, but recognizes
+# the validated 16 CPU / SMT-off OCI VM profile:
+#   housekeeping=6-8, isolated=0-5,9-15, echo hot pins=1,2,3,4.
+benchmark_cpu_profile: auto
+benchmark_housekeeping_cpus_override: ""
+benchmark_isolated_cpus_override: ""
+benchmark_irq_affinity_override: ""
+benchmark_echo_client_pins: ""
+benchmark_echo_server_pins: ""
+
+# Write /etc/default/grub.d/51-aeron-cpu-isolation.cfg from live CPU count (SMT-aware); requires reboot
+grub_dynamic_cpu_isolation: true
+# Housekeeping = min(N, min(cap, max(floor, ceil(N * fraction)))); cap 0 = no upper bound. Terraform passes via -e.
+grub_housekeeping_fraction: 0.17
+grub_housekeeping_floor: 2
+grub_housekeeping_cpus_max: 8
+
+# Aeron stable defaults. The bm_rdma benchmark_tuning_profile promotes these
+# to the validated BM high-rate values unless an explicit override is supplied.
 aeron_max_messages_per_send: 1
 aeron_receiver_io_vector_capacity: 1
 aeron_sender_io_vector_capacity: 1
-
-# Optional: apply GRUB-based CPU isolation (requires reboot)
-apply_cpu_isolation_grub: false
+benchmark_aeron_max_messages_per_send: ""
+benchmark_aeron_receiver_io_vector_capacity: ""
+benchmark_aeron_sender_io_vector_capacity: ""
 
 # Java and Aeron JVM/options (--add-opens required for Java 17+ with Agrona)
 aeron_java_opts: >-
@@ -64,9 +98,15 @@ aeron_java_opts: >-
   -Daeron.term.buffer.sparse.file=false
   -Daeron.pre.touch.mapped.memory=true
 
-# Socket buffer tuning for Aeron (2m = 2 MiB)
+# Socket buffer tuning for Aeron. Stable VM default is 2 MiB; bm_rdma raises it
+# to 16 MiB through the rendered benchmark profile.
 aeron_socket_so_sndbuf: "2m"
 aeron_socket_so_rcvbuf: "2m"
+aeron_rcv_initial_window_length: "2m"
+benchmark_aeron_socket_so_sndbuf: ""
+benchmark_aeron_socket_so_rcvbuf: ""
+benchmark_aeron_rcv_initial_window_length: ""
+benchmark_onload_command_vma: ""
 
 # Benchmark sweep (sizes and iterations for run-benchmark.sh)
 benchmark_message_sizes:

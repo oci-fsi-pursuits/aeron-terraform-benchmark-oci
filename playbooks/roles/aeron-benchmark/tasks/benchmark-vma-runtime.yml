@@ -1,0 +1,66 @@
+---
+# Install Mellanox VMA user-space library (libvma) for java_vma / c_vma benchmarks.
+# Set benchmark_vma_lib_path to match nodes (e.g. /usr/lib/x86_64-linux-gnu/... on Ubuntu,
+# /usr/lib64/libvma.so.9 on Oracle Linux / RHEL). Same value is templated on the controller.
+
+- name: Install libvma (Debian/Ubuntu, optional — default apt has no libvma; enable after MLNX repo)
+  ansible.builtin.apt:
+    name: "{{ benchmark_vma_debian_package | default('libvma') }}"
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+    lock_timeout: 600
+  become: true
+  when:
+    - benchmark_install_vma_runtime | default(false) | bool
+    - ansible_os_family == "Debian"
+    - benchmark_vma_debian_install_via_apt | default(false) | bool
+    - not (benchmark_vma_build_from_source | default(false) | bool)
+
+- name: Install libvma (RedHat / Oracle Linux)
+  ansible.builtin.dnf:
+    name: "{{ benchmark_vma_redhat_package | default('libvma') }}"
+    state: present
+  become: true
+  when:
+    - benchmark_install_vma_runtime | default(false) | bool
+    - ansible_os_family == "RedHat"
+    - not (benchmark_vma_build_from_source | default(false) | bool)
+
+- name: Build and install libvma from source (Mellanox GitHub)
+  ansible.builtin.import_tasks: benchmark-vma-source.yml
+  when:
+    - benchmark_install_vma_runtime | default(false) | bool
+    - benchmark_vma_build_from_source | default(false) | bool
+
+- name: Check benchmark_vma_lib_path exists (libvma install + path must match image)
+  ansible.builtin.stat:
+    path: "{{ benchmark_vma_lib_path | default('/usr/lib/x86_64-linux-gnu/libvma.so.9') }}"
+  register: _benchmark_vma_lib_stat
+  when: benchmark_install_vma_runtime | default(false) | bool
+
+- name: Locate libvma.so on node (hint if wrong benchmark_vma_lib_path)
+  ansible.builtin.shell: |
+    set +e
+    (rpm -ql libvma 2>/dev/null || dpkg -L libvma 2>/dev/null || true) | grep -E 'libvma\.so\.[0-9]+$' | head -3
+    find /usr/lib /usr/lib64 -maxdepth 6 -name 'libvma.so.*' 2>/dev/null | head -5
+  args:
+    executable: /bin/bash
+  register: _benchmark_vma_hint
+  changed_when: false
+  failed_when: false
+  when:
+    - benchmark_install_vma_runtime | default(false) | bool
+    - not (_benchmark_vma_lib_stat.stat.exists | default(false))
+
+- name: Assert VMA library file exists at benchmark_vma_lib_path
+  ansible.builtin.assert:
+    that:
+      - _benchmark_vma_lib_stat.stat.exists | default(false)
+    fail_msg: >-
+      benchmark_install_vma_runtime is true but {{ benchmark_vma_lib_path }} is missing on this host.
+      Set benchmark_vma_lib_path to the installed soname (dnf/apt package, or after benchmark_vma_build_from_source make install).
+      Hints: {{ _benchmark_vma_hint.stdout | default('(no package / find listing)') | trim }}
+  when:
+    - benchmark_install_vma_runtime | default(false) | bool
+    - _benchmark_vma_lib_stat is defined

@@ -7,7 +7,46 @@ aeron_benchmark_receiver_hostname: aeron-benchmark-receiver
 aeron_benchmark_failover_hostname: aeron-benchmark-failover
 
 aeron_benchmark_configure_host_firewall: true
+
+# Optional: before/after manual benchmarks — ansible-playbook site.yml --tags benchmark_host_quiet \
+#   -e benchmark_host_quiet_apply=true   (then later -e benchmark_host_quiet_restore=true, without apply)
+# Stops/runtime-masks apt-daily, unattended-upgrades, snap. Or use BENCHMARK_QUIET_MODE=1 on run-driver-matrix.sh.
+benchmark_host_quiet_apply: false
+benchmark_host_quiet_restore: false
+
+# Mellanox VMA: benchmarks pass --onload to aeron-io scripts; use LD_PRELOAD (not Solarflare `onload` CLI).
+benchmark_vma_lib_path: "/usr/lib/x86_64-linux-gnu/libvma.so.9"
+# Install distro libvma package on benchmark workload nodes (client/receiver/failover) before matrix preflight.
+# RedHat/Oracle: dnf install works out of the box. Debian/Ubuntu: libvma is not in default apt — set
+# benchmark_vma_debian_install_via_apt=true only after adding Mellanox apt repo, or pre-install libvma and leave this false.
+# Or set benchmark_vma_build_from_source=true (requires libibverbs/librdmacm/libmlx5 dev packages; pin benchmark_vma_git_ref).
+benchmark_install_vma_runtime: false
+benchmark_vma_build_from_source: false
+benchmark_vma_git_url: "https://github.com/Mellanox/libvma.git"
+benchmark_vma_git_ref: "master"
+benchmark_vma_source_dir: "/usr/local/src/libvma"
+benchmark_vma_configure_libdir: ""
+benchmark_vma_configure_extra: ""
+benchmark_vma_source_force_rebuild: false
+benchmark_vma_debian_install_via_apt: false
+# Optional package name overrides if your image uses a different name (e.g. libvma1).
+benchmark_vma_debian_package: "libvma"
+benchmark_vma_redhat_package: "libvma"
+# When true on client/receiver/failover nodes, setcap cap_net_raw+ep on Java + aeronmd (needed for VMA offload).
+benchmark_vma_apply_setcap: false
+
 # Effective VCN (or override) CIDR — must be non-empty on benchmark nodes for iptables rule.
 aeron_benchmark_host_udp_source_cidr: ""
 # When true, install iptables-persistent and run netfilter-persistent save after inserting rule.
 aeron_benchmark_host_firewall_persistent: false
+
+# Optional block volume mount for BM/RDMA cluster benchmark data.
+benchmark_block_volume_enabled: false
+benchmark_block_volume_size_gb: 256
+benchmark_block_volume_device: "/dev/oracleoci/oraclevdb"
+benchmark_block_volume_attachment_type: "paravirtualized"
+benchmark_block_volume_mount_path: "/mnt/aeron-cluster"
+benchmark_block_volume_mount_opts: "defaults,noatime,nodiratime,nofail,stripe=256"
+
+# Cluster benchmark UDP path. Use vcn for cross-AD Raft clusters; RDMA/RoCE fabric is only valid when every member can use it.
+benchmark_cluster_udp_fabric: "auto"

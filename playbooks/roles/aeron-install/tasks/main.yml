@@ -19,6 +19,24 @@
     state: absent
   when: ansible_os_family == 'Debian'
 
+- name: Wait for first-boot apt/dpkg activity to finish (Debian)
+  ansible.builtin.shell: |
+    set -euo pipefail
+    for _ in $(seq 1 120); do
+      if fuser /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/cache/apt/archives/lock /var/lib/apt/lists/lock >/dev/null 2>&1; then
+        sleep 5
+        continue
+      fi
+      exit 0
+    done
+    echo "Timed out waiting for apt/dpkg locks to clear" >&2
+    fuser -v /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/cache/apt/archives/lock /var/lib/apt/lists/lock || true
+    exit 1
+  args:
+    executable: /bin/bash
+  changed_when: false
+  when: ansible_os_family == 'Debian'
+
 - name: Install git and benchmark tooling (Ubuntu)
   apt:
     name:
@@ -35,6 +53,7 @@
       - hwloc
     state: present
     update_cache: yes
+    lock_timeout: 600
   when: ansible_os_family == 'Debian'
 
 - name: Ensure git is installed (RHEL)
@@ -52,6 +71,7 @@
   apt:
     name: "openjdk-{{ java_version }}-jdk"
     state: present
+    lock_timeout: 600
   when: ansible_os_family == 'Debian'
 
 - name: Install Java {{ java_version }} (RHEL)
@@ -59,6 +79,33 @@
     name: "java-{{ java_version }}-openjdk-devel"
     state: present
   when: ansible_os_family == 'RedHat'
+
+- name: Install and activate oci-cn-auth on RDMA nodes (RHEL/Oracle Linux)
+  when:
+    - enable_rdma_compute_cluster | default(false) | bool
+    - install_oci_cn_auth | default(false) | bool
+    - ansible_os_family == 'RedHat'
+    - (node_role | default('')) in ['client', 'receiver', 'failover']
+  block:
+    - name: Install oci-cn-auth package
+      yum:
+        name: oci-cn-auth
+        state: present
+
+    - name: Enable and start oci-cn-auth service
+      systemd:
+        name: oci-cn-auth
+        enabled: true
+        state: started
+
+- name: RDMA note for oci-cn-auth when using non-RHEL images
+  debug:
+    msg: "install_oci_cn_auth=true requested, but oci-cn-auth RPM install is only automated for RedHat/Oracle Linux nodes."
+  when:
+    - enable_rdma_compute_cluster | default(false) | bool
+    - install_oci_cn_auth | default(false) | bool
+    - ansible_os_family != 'RedHat'
+    - (node_role | default('')) in ['client', 'receiver', 'failover']
 
 - name: Set JAVA_HOME for Ubuntu
   lineinfile:
@@ -81,16 +128,36 @@
     version: "{{ aeron_git_branch | default('master', true) }}"
     force: yes
   register: aeron_clone
+  until: aeron_clone is succeeded
+  retries: 6
+  delay: 20
+
+- name: Resolve Java home for installed OS family
+  set_fact:
+    aeron_java_home: "{{ '/usr/lib/jvm/java-' ~ java_version ~ '-openjdk' if ansible_os_family == 'RedHat' else '/usr/lib/jvm/java-' ~ java_version ~ '-openjdk-amd64' }}"
+
+- name: Increase Aeron Gradle wrapper network timeout
+  lineinfile:
+    path: "{{ aeron_dir }}/aeron-src/gradle/wrapper/gradle-wrapper.properties"
+    regexp: '^networkTimeout='
+    line: "networkTimeout={{ gradle_wrapper_network_timeout_ms | default(120000) }}"
+    create: false
+  when: aeron_clone.changed or force_rebuild | default(false)
 
 - name: Build Aeron with Gradle
   shell: |
-    export JAVA_HOME=/usr/lib/jvm/java-{{ java_version }}-openjdk-amd64
-    ./gradlew clean
-    ./gradlew assemble -x javadoc
+    set -euo pipefail
+    export JAVA_HOME={{ aeron_java_home }}
+    ./gradlew --no-daemon clean assemble -x javadoc
   args:
     chdir: "{{ aeron_dir }}/aeron-src"
+    executable: /bin/bash
   environment:
-    JAVA_HOME: "/usr/lib/jvm/java-{{ java_version }}-openjdk-amd64"
+    JAVA_HOME: "{{ aeron_java_home }}"
+  register: aeron_gradle_build
+  until: aeron_gradle_build is succeeded
+  retries: "{{ gradle_build_retries | default(4) }}"
+  delay: "{{ gradle_build_retry_delay_sec | default(30) }}"
   when: aeron_clone.changed or force_rebuild | default(false)
 
 - name: Find built Aeron jars
@@ -117,7 +184,7 @@
     content: |
       #!/bin/bash
       AERON_DIR="{{ aeron_dir }}"
-      JAVA_HOME="/usr/lib/jvm/java-{{ java_version }}-openjdk-amd64"
+      JAVA_HOME="{{ aeron_java_home }}"
       
       export JAVA_OPTS="{{ aeron_java_opts }}"
       export AERON_SOCKET_SO_SNDBUF="{{ aeron_socket_so_sndbuf | default('2m') }}"
@@ -138,7 +205,7 @@
     content: |
       #!/bin/bash
       AERON_DIR="{{ aeron_dir }}"
-      JAVA_HOME="/usr/lib/jvm/java-{{ java_version }}-openjdk-amd64"
+      JAVA_HOME="{{ aeron_java_home }}"
       
       MESSAGE_SIZE=${1:-{{ message_length | default(288) }}}
       MESSAGES=${2:-1000000}
@@ -163,7 +230,7 @@
     content: |
       #!/bin/bash
       AERON_DIR="{{ aeron_dir }}"
-      JAVA_HOME="/usr/lib/jvm/java-{{ java_version }}-openjdk-amd64"
+      JAVA_HOME="{{ aeron_java_home }}"
       
       export JAVA_OPTS="{{ aeron_java_opts }}"
       export AERON_SOCKET_SO_SNDBUF="{{ aeron_socket_so_sndbuf | default('2m') }}"
@@ -184,7 +251,7 @@
     content: |
       #!/bin/bash
       AERON_DIR="{{ aeron_dir }}"
-      JAVA_HOME="/usr/lib/jvm/java-{{ java_version }}-openjdk-amd64"
+      JAVA_HOME="{{ aeron_java_home }}"
       
       MESSAGE_SIZE=${1:-32}
       MESSAGES=${2:-100000000}
@@ -204,10 +271,10 @@
     dest: /etc/sysctl.d/99-aeron-benchmarks.conf
     content: |
       # Aeron benchmark socket and memory tuning (aligned with quickstart)
-      net.core.rmem_max={{ socket_buf }}
-      net.core.wmem_max={{ socket_buf }}
-      net.core.rmem_default={{ socket_buf }}
-      net.core.wmem_default={{ socket_buf }}
+      net.core.rmem_max={{ socket_buf_max | default(socket_buf | default(33554432)) }}
+      net.core.wmem_max={{ socket_buf_max | default(socket_buf | default(33554432)) }}
+      net.core.rmem_default={{ socket_buf_default | default(8388608) }}
+      net.core.wmem_default={{ socket_buf_default | default(8388608) }}
       net.core.netdev_max_backlog=100000
       net.core.busy_poll=50
       net.core.busy_read=50
@@ -225,21 +292,491 @@
   changed_when: true
   when: (node_role | default('')) in ['client', 'receiver', 'failover']
 
-- name: Configure CPU isolation GRUB drop-in (optional, requires reboot)
-  copy:
-    dest: /etc/default/grub.d/99-aeron-benchmarks.cfg
+- name: Install CPU performance governor script (benchmark profile)
+  ansible.builtin.copy:
+    dest: /usr/local/sbin/aeron-cpu-performance.sh
+    mode: "0755"
     content: |
-      # Aeron CPU isolation: housekeeping vs isolated CPUs (see quickstart guide)
-      AERON_ISOLATE_CPUS="{{ isolated_cpus }}"
-      if [ -n "${AERON_ISOLATE_CPUS}" ]; then
-        GRUB_CMDLINE_LINUX_DEFAULT="$GRUB_CMDLINE_LINUX_DEFAULT isolcpus=managed_irq,domain,${AERON_ISOLATE_CPUS} nohz_full=${AERON_ISOLATE_CPUS} rcu_nocbs=${AERON_ISOLATE_CPUS} irqaffinity={{ irq_affinity }}"
-      fi
-    mode: '0644'
-  when: apply_cpu_isolation_grub | default(false) | bool
+      #!/usr/bin/env bash
+      set -euo pipefail
 
-- name: Update grub (when CPU isolation is enabled)
-  command: update-grub
-  when: apply_cpu_isolation_grub | default(false) | bool
+      for cpu_dir in /sys/devices/system/cpu/cpu[0-9]*; do
+        gov="${cpu_dir}/cpufreq/scaling_governor"
+        epp="${cpu_dir}/cpufreq/energy_performance_preference"
+        if [[ -w "${gov}" ]]; then
+          echo performance > "${gov}" || true
+        fi
+        if [[ -w "${epp}" ]]; then
+          echo performance > "${epp}" || true
+        fi
+      done
+  when: (node_role | default('')) in ['client', 'receiver', 'failover']
+
+- name: Install CPU performance governor service (benchmark profile)
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/aeron-cpu-performance.service
+    mode: "0644"
+    content: |
+      [Unit]
+      Description=Aeron benchmark CPU performance governor
+      After=multi-user.target
+
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/local/sbin/aeron-cpu-performance.sh
+      RemainAfterExit=yes
+
+      [Install]
+      WantedBy=multi-user.target
+  register: aeron_cpu_performance_unit
+  when: (node_role | default('')) in ['client', 'receiver', 'failover']
+
+- name: Reload systemd for CPU performance governor service
+  ansible.builtin.systemd:
+    daemon_reload: true
+  when:
+    - (node_role | default('')) in ['client', 'receiver', 'failover']
+    - aeron_cpu_performance_unit.changed | default(false)
+
+- name: Enable and start CPU performance governor service
+  ansible.builtin.systemd:
+    name: aeron-cpu-performance
+    enabled: true
+    state: started
+  when: (node_role | default('')) in ['client', 'receiver', 'failover']
+
+- name: Compute dynamic GRUB CPU isolation (benchmark / failover nodes only)
+  when:
+    - grub_dynamic_cpu_isolation | default(true) | bool
+    - (node_role | default('')) in ['client', 'receiver', 'failover']
+  block:
+    - name: Logical CPU count from facts (fallback to benchmark_ocpus × threads from stack)
+      set_fact:
+        aeron_grub_logical_cpus: "{{ ansible_processor_nproc | default(ansible_processor_vcpus | default((benchmark_ocpus | default(10) | int) * (2 if (hyperthreading | default(false) | bool) else 1), true), true) | int }}"
+
+    - name: Physical core count from facts (for SMT detection)
+      set_fact:
+        aeron_grub_physical_cpus: "{{ (ansible_processor_count | default(1) | int) * (ansible_processor_cores | default(1) | int) }}"
+
+    - name: Infer SMT from topology (logical CPUs > reported physical cores)
+      set_fact:
+        aeron_grub_smt_detected: "{{ ((aeron_grub_logical_cpus | int) > (aeron_grub_physical_cpus | int)) | bool }}"
+
+    - name: Warn when Terraform hyperthreading does not match detected SMT
+      debug:
+        msg: "grub isolation: Terraform hyperthreading={{ hyperthreading | default(false) }} but facts suggest SMT={{ 'on' if (aeron_grub_smt_detected | bool) else 'off' }} (logical={{ aeron_grub_logical_cpus }} physical_cores={{ aeron_grub_physical_cpus }})."
+      when: (hyperthreading | default(false) | bool) != (aeron_grub_smt_detected | bool)
+
+    - name: Use physical CPU count for GRUB isolation when SMT is disabled by Terraform
+      set_fact:
+        aeron_grub_logical_cpus: "{{ aeron_grub_physical_cpus | int }}"
+      when:
+        - not (hyperthreading | default(false) | bool)
+        - aeron_grub_smt_detected | bool
+
+    # Handoff: HK_COUNT = min(TOTAL, min(cap, max(floor, ceil(TOTAL * fraction)))); cap 0 = no upper bound.
+    - name: Compute housekeeping intermediates (N, fraction, floor, cap)
+      set_fact:
+        _hk_n: "{{ aeron_grub_logical_cpus | int }}"
+        _hk_r: "{{ grub_housekeeping_fraction | default(0.17) | float }}"
+        _hk_floor: "{{ grub_housekeeping_floor | default(2) | int }}"
+        _hk_cap: "{{ grub_housekeeping_cpus_max | default(8) | int }}"
+
+    - name: Housekeeping step1 min(N, max(floor, ceil(N*fraction)))
+      set_fact:
+        _hk_step1: "{{ [_hk_n | int, [ _hk_floor | int, ((_hk_n | int) * (_hk_r | float)) | round(0, 'ceil') | int ] | max] | min }}"
+
+    - name: Final housekeeping CPU count (optional upper cap when cap > 0)
+      set_fact:
+        aeron_hk_count: "{{ ([_hk_step1 | int, _hk_cap | int] | min) if ((_hk_cap | int) > 0) else (_hk_step1 | int) }}"
+
+    - name: Select benchmark CPU isolation profile
+      set_fact:
+        aeron_benchmark_cpu_profile: "{{ benchmark_cpu_profile | default('auto') }}"
+        aeron_use_vm16_smt_off_profile: >-
+          {{
+            (benchmark_cpu_profile | default('auto')) == 'oci_vm_16_smt_off'
+            or (
+              (benchmark_cpu_profile | default('auto')) == 'auto'
+              and not (hyperthreading | default(false) | bool)
+              and (aeron_grub_logical_cpus | int) == 16
+            )
+          }}
+
+    - name: Publish housekeeping / isolated / IRQ affinity for GRUB and benchmark templates
+      set_fact:
+        aeron_hk_last_index: "{{ ((benchmark_housekeeping_cpus_override | default('') | trim) | regex_replace('^.*[-,]', '') | int) if ((benchmark_housekeeping_cpus_override | default('') | trim | length) > 0) else (8 if (aeron_use_vm16_smt_off_profile | bool) else ((aeron_hk_count | int) - 1)) }}"
+        aeron_grub_skip_isolcpus: "{{ false if ((benchmark_isolated_cpus_override | default('') | trim | length) > 0 or (aeron_use_vm16_smt_off_profile | bool)) else ((aeron_hk_count | int) >= (aeron_grub_logical_cpus | int)) }}"
+        isolated_cpus: >-
+          {{
+            (benchmark_isolated_cpus_override | default('') | trim)
+            if (benchmark_isolated_cpus_override | default('') | trim | length) > 0
+            else (
+              '0-5,9-15'
+              if (aeron_use_vm16_smt_off_profile | bool)
+              else (
+                ''
+                if (aeron_hk_count | int) >= (aeron_grub_logical_cpus | int)
+                else ((aeron_hk_count | int) | string) + '-' + (((aeron_grub_logical_cpus | int) - 1) | string)
+              )
+            )
+          }}
+        housekeeping_cpus: >-
+          {{
+            (benchmark_housekeeping_cpus_override | default('') | trim)
+            if (benchmark_housekeeping_cpus_override | default('') | trim | length) > 0
+            else ('6-8' if (aeron_use_vm16_smt_off_profile | bool) else ('0-' + (((aeron_hk_count | int) - 1) | string)))
+          }}
+        irq_affinity: >-
+          {{
+            (benchmark_irq_affinity_override | default('') | trim)
+            if (benchmark_irq_affinity_override | default('') | trim | length) > 0
+            else (
+              (benchmark_housekeeping_cpus_override | default('') | trim)
+              if (benchmark_housekeeping_cpus_override | default('') | trim | length) > 0
+              else ('6-8' if (aeron_use_vm16_smt_off_profile | bool) else ('0-' + (((aeron_hk_count | int) - 1) | string)))
+            )
+          }}
+
+    - name: Ensure systemd manager config directory exists
+      ansible.builtin.file:
+        path: /etc/systemd/system.conf.d
+        state: directory
+        mode: "0755"
+
+    - name: Keep default systemd services on housekeeping CPUs
+      ansible.builtin.copy:
+        dest: /etc/systemd/system.conf.d/50-aeron-housekeeping.conf
+        content: |
+          [Manager]
+          DefaultCPUAffinity={{ housekeeping_cpus }}
+        mode: "0644"
+      register: aeron_systemd_housekeeping
+
+    - name: Re-exec systemd after housekeeping CPU affinity change
+      ansible.builtin.systemd:
+        daemon_reexec: true
+      when:
+        - aeron_systemd_housekeeping.changed | default(false)
+        - (node_role | default('')) not in ['client', 'receiver', 'failover']
+
+# Drop-in must append GRUB_CMDLINE_LINUX_DEFAULT in one assignment (sourced by sh). Do not use nested if —
+# some images/source orders skip it. Main /etc/default/grub may still show only quiet splash; check grub.d + grub.cfg.
+- name: Check whether /etc/default/grub sources /etc/default/grub.d/*.cfg
+  ansible.builtin.shell: grep -qE 'grub\.d|/etc/default/grub\.d' /etc/default/grub
+  register: aeron_grub_d_sourced
+  changed_when: false
+  failed_when: false
+  when:
+    - grub_dynamic_cpu_isolation | default(true) | bool
+    - (node_role | default('')) in ['client', 'receiver', 'failover']
+
+- name: Ensure grub.d snippets are sourced from /etc/default/grub
+  ansible.builtin.blockinfile:
+    path: /etc/default/grub
+    marker: "# {mark} ANSIBLE AERON source grub.d"
+    block: |
+      if [ -d /etc/default/grub.d ]; then
+        for _aeron_grub_cfg in /etc/default/grub.d/*.cfg; do
+          if [ -f "${_aeron_grub_cfg}" ]; then
+            . "${_aeron_grub_cfg}"
+          fi
+        done
+      fi
+    insertafter: EOF
+  register: aeron_grub_source_block
+  when:
+    - grub_dynamic_cpu_isolation | default(true) | bool
+    - (node_role | default('')) in ['client', 'receiver', 'failover']
+    - aeron_grub_d_sourced.rc | default(1) != 0
+
+- name: Stat Ubuntu cloudimg grub defaults
+  ansible.builtin.stat:
+    path: /etc/default/grub.d/50-cloudimg-settings.cfg
+  register: aeron_grub_cloudimg
+  when:
+    - grub_dynamic_cpu_isolation | default(true) | bool
+    - (node_role | default('')) in ['client', 'receiver', 'failover']
+
+# Prior buggy isolcpus=\S+ strip could leave this file unsourceable; update-grub then fails before replace can fix it.
+- name: Check cloudimg grub snippet is valid shell (detect corruption)
+  ansible.builtin.shell: bash -n /etc/default/grub.d/50-cloudimg-settings.cfg
+  register: aeron_grub_cloudimg_bash_n
+  changed_when: false
+  failed_when: false
+  when:
+    - grub_dynamic_cpu_isolation | default(true) | bool
+    - (node_role | default('')) in ['client', 'receiver', 'failover']
+    - ansible_os_family == 'Debian'
+    - aeron_grub_cloudimg is defined
+    - aeron_grub_cloudimg.stat.exists | default(false)
+
+- name: Restore 50-cloudimg-settings.cfg via package reinstall when corrupt
+  ansible.builtin.shell: |
+    set -eu
+    CFG=/etc/default/grub.d/50-cloudimg-settings.cfg
+    PKG=$(dpkg -S "${CFG}" 2>/dev/null | head -n1 | cut -d: -f1 | tr -d ' \n' || true)
+    rm -f "${CFG}"
+    if [ -n "${PKG}" ]; then
+      DEBIAN_FRONTEND=noninteractive apt-get install -y --reinstall "${PKG}" || true
+    fi
+    if [ ! -f "${CFG}" ]; then
+      DEBIAN_FRONTEND=noninteractive apt-get install -y --reinstall cloud-initramfs-growroot \
+        || DEBIAN_FRONTEND=noninteractive apt-get install -y cloud-initramfs-growroot || true
+    fi
+    if [ ! -f "${CFG}" ]; then
+      # Some images do not repopulate this path on reinstall; minimal valid stub for grub-mkconfig.
+      printf '%s\n' 'GRUB_CMDLINE_LINUX_DEFAULT="${GRUB_CMDLINE_LINUX_DEFAULT:-}"' > "${CFG}"
+      chmod 0644 "${CFG}"
+    fi
+    bash -n "${CFG}"
+  args:
+    executable: /bin/bash
+  register: aeron_grub_cloudimg_restore
+  changed_when: true
+  become: true
+  when:
+    - grub_dynamic_cpu_isolation | default(true) | bool
+    - (node_role | default('')) in ['client', 'receiver', 'failover']
+    - ansible_os_family == 'Debian'
+    - aeron_grub_cloudimg is defined
+    - aeron_grub_cloudimg.stat.exists | default(false)
+    - aeron_grub_cloudimg_bash_n is defined
+    - aeron_grub_cloudimg_bash_n.rc | default(0) != 0
+
+# Do not use \S+ here: it can swallow the closing " on GRUB_CMDLINE_LINUX_DEFAULT="... isolcpus=8-47" and break sh parsing.
+- name: Strip kernel isolation tokens from cloudimg grub snippet (avoid duplicate isolcpus with 51-aeron fragment)
+  ansible.builtin.replace:
+    path: /etc/default/grub.d/50-cloudimg-settings.cfg
+    regexp: "{{ item }}"
+    replace: " "
+    backup: true
+  loop:
+    - '\bisolcpus=[^"\s]+'
+    - '\bnohz_full=[^"\s]+'
+    - '\brcu_nocbs=[^"\s]+'
+    - '\birqaffinity=[^"\s]+'
+  register: aeron_grub_cloudimg_strip
+  when:
+    - grub_dynamic_cpu_isolation | default(true) | bool
+    - (node_role | default('')) in ['client', 'receiver', 'failover']
+    - aeron_grub_cloudimg is defined
+    - aeron_grub_cloudimg.stat.exists | default(false)
+
+- name: Stat legacy GRUB drop-in 99-aeron-benchmarks.cfg (remediation — retire conflicting name)
+  ansible.builtin.stat:
+    path: /etc/default/grub.d/99-aeron-benchmarks.cfg
+  register: aeron_grub_leg99
+  when:
+    - grub_dynamic_cpu_isolation | default(true) | bool
+    - (node_role | default('')) in ['client', 'receiver', 'failover']
+
+- name: Disable legacy 99-aeron-benchmarks.cfg to avoid stacked duplicate isolcpus
+  ansible.builtin.command:
+    argv:
+      - mv
+      - /etc/default/grub.d/99-aeron-benchmarks.cfg
+      - /etc/default/grub.d/99-aeron-benchmarks.cfg.disabled
+  register: aeron_grub_leg99_mv
+  when:
+    - grub_dynamic_cpu_isolation | default(true) | bool
+    - (node_role | default('')) in ['client', 'receiver', 'failover']
+    - aeron_grub_leg99 is defined
+    - aeron_grub_leg99.stat.exists | default(false)
+  changed_when: true
+
+- name: Configure CPU isolation GRUB fragment 51-aeron-cpu-isolation.cfg (single managed Aeron block; not 99)
+  ansible.builtin.copy:
+    dest: /etc/default/grub.d/51-aeron-cpu-isolation.cfg
+    content: |
+      # Aeron CPU isolation — logical={{ aeron_grub_logical_cpus | default('?') }} housekeeping={{ housekeeping_cpus | default('') }} isolated={{ isolated_cpus | default('') }} SMT_detected={{ aeron_grub_smt_detected | default(false) }}
+      GRUB_CMDLINE_LINUX_DEFAULT="$GRUB_CMDLINE_LINUX_DEFAULT isolcpus=managed_irq,domain,{{ isolated_cpus }} nohz_full={{ isolated_cpus }} rcu_nocbs={{ isolated_cpus }} irqaffinity={{ irq_affinity | default('0-1') }}{% if not (hyperthreading | default(false) | bool) %} nosmt{% endif %}"
+    mode: "0644"
+  register: aeron_grub_dropin
+  when:
+    - grub_dynamic_cpu_isolation | default(true) | bool
+    - (node_role | default('')) in ['client', 'receiver', 'failover']
+    - (isolated_cpus | default('') | trim | length) > 0
+
+- name: Remove Aeron GRUB fragment when no isolcpus band (all logical CPUs are housekeeping)
+  ansible.builtin.file:
+    path: /etc/default/grub.d/51-aeron-cpu-isolation.cfg
+    state: absent
+  register: aeron_grub_dropin_removed
+  when:
+    - grub_dynamic_cpu_isolation | default(true) | bool
+    - (node_role | default('')) in ['client', 'receiver', 'failover']
+    - (isolated_cpus | default('') | trim | length) == 0
+
+- name: Update grub (dynamic CPU isolation)
+  ansible.builtin.command: update-grub
+  register: aeron_update_grub
+  changed_when: true
+  when:
+    - grub_dynamic_cpu_isolation | default(true) | bool
+    - (node_role | default('')) in ['client', 'receiver', 'failover']
+    - (aeron_grub_source_block is defined and aeron_grub_source_block.changed | default(false))
+      or (aeron_grub_dropin is defined and aeron_grub_dropin.changed | default(false))
+      or (aeron_grub_dropin_removed is defined and aeron_grub_dropin_removed.changed | default(false))
+      or (aeron_grub_cloudimg_strip is defined and aeron_grub_cloudimg_strip.changed | default(false))
+      or (aeron_grub_leg99_mv is defined and aeron_grub_leg99_mv.changed | default(false))
+      or (aeron_grub_cloudimg_restore is defined and aeron_grub_cloudimg_restore.changed | default(false))
+
+- name: Read running kernel command line for isolation validation
+  ansible.builtin.command: cat /proc/cmdline
+  register: aeron_running_cmdline
+  changed_when: false
+  when:
+    - grub_dynamic_cpu_isolation | default(true) | bool
+    - (node_role | default('')) in ['client', 'receiver', 'failover']
+
+- name: Determine whether benchmark node needs isolation reboot
+  ansible.builtin.set_fact:
+    aeron_isolation_reboot_required: >-
+      {{
+        ((aeron_update_grub is defined and aeron_update_grub.changed | default(false))
+        or (('isolcpus=managed_irq,domain,' ~ (isolated_cpus | default(''))) not in (aeron_running_cmdline.stdout | default('')))
+        or (('nohz_full=' ~ (isolated_cpus | default(''))) not in (aeron_running_cmdline.stdout | default('')))
+        or (('rcu_nocbs=' ~ (isolated_cpus | default(''))) not in (aeron_running_cmdline.stdout | default('')))
+        or ((not (hyperthreading | default(false) | bool)) and ('nosmt' not in (aeron_running_cmdline.stdout | default('')))))
+        | bool
+      }}
+  when:
+    - grub_dynamic_cpu_isolation | default(true) | bool
+    - (node_role | default('')) in ['client', 'receiver', 'failover']
+    - (isolated_cpus | default('') | trim | length) > 0
+
+- name: Mark benchmark node for controller-managed isolation reboot
+  ansible.builtin.file:
+    path: /var/run/aeron-isolation-reboot-required
+    state: touch
+    mode: "0644"
+  when:
+    - grub_dynamic_cpu_isolation | default(true) | bool
+    - (node_role | default('')) in ['client', 'receiver', 'failover']
+    - aeron_isolation_reboot_required | default(false) | bool
+
+- name: Read SMT state after isolation reboot
+  ansible.builtin.command: cat /sys/devices/system/cpu/smt/active
+  register: aeron_smt_active
+  changed_when: false
+  failed_when: false
+  when:
+    - grub_dynamic_cpu_isolation | default(true) | bool
+    - not (hyperthreading | default(false) | bool)
+    - (node_role | default('')) in ['client', 'receiver', 'failover']
+    - not (aeron_isolation_reboot_required | default(false) | bool)
+
+- name: Assert SMT is disabled when hyperthreading=false
+  ansible.builtin.assert:
+    that:
+      - (aeron_smt_active.stdout | default('0') | trim) == '0'
+    fail_msg: "hyperthreading=false requested, but SMT is still active on {{ inventory_hostname }}."
+  when:
+    - grub_dynamic_cpu_isolation | default(true) | bool
+    - not (hyperthreading | default(false) | bool)
+    - (node_role | default('')) in ['client', 'receiver', 'failover']
+    - not (aeron_isolation_reboot_required | default(false) | bool)
+
+- name: Aeron benchmark bootstrap — taskset init/sshd, IRQ mask, iptables (remediation handoff)
+  when:
+    - grub_dynamic_cpu_isolation | default(true) | bool
+    - (node_role | default('')) in ['client', 'receiver', 'failover']
+    - (aeron_grub_logical_cpus | default(0) | int) >= 1
+    - aeron_hk_last_index is defined
+  block:
+    - name: Install aeron-set-default-irq-affinity.sh
+      ansible.builtin.template:
+        src: aeron-set-default-irq-affinity.sh.j2
+        dest: "{{ aeron_dir }}/bin/aeron-set-default-irq-affinity.sh"
+        mode: "0755"
+      register: aeron_irq_script
+
+    - name: Record housekeeping high CPU index for IRQ script
+      ansible.builtin.copy:
+        content: "{{ (aeron_hk_last_index | int) }}\n"
+        dest: "{{ aeron_dir }}/housekeeping-last-cpu"
+        mode: "0644"
+      register: aeron_irq_hk_file
+
+    - name: Record explicit housekeeping CPU list for IRQ/bootstrap/wrappers
+      ansible.builtin.copy:
+        content: "{{ housekeeping_cpus | default('0-1') }}\n"
+        dest: "{{ aeron_dir }}/housekeeping-cpus"
+        mode: "0644"
+      register: aeron_irq_hk_cpus_file
+
+    - name: Record explicit isolated CPU list for validation/wrappers
+      ansible.builtin.copy:
+        content: "{{ isolated_cpus | default('') }}\n"
+        dest: "{{ aeron_dir }}/isolated-cpus"
+        mode: "0644"
+      register: aeron_isolated_cpus_file
+
+    - name: Record benchmark CPU profile name
+      ansible.builtin.copy:
+        content: "{{ aeron_benchmark_cpu_profile | default('auto') }}\n"
+        dest: "{{ aeron_dir }}/benchmark-cpu-profile"
+        mode: "0644"
+      register: aeron_cpu_profile_file
+
+    - name: Record benchmark ingress CIDR for bootstrap iptables (empty = skip rule in script)
+      ansible.builtin.copy:
+        content: "{{ (aeron_benchmark_host_udp_source_cidr | default('') | trim) }}\n"
+        dest: "{{ aeron_dir }}/benchmark-ingress-cidr"
+        mode: "0644"
+      when: (aeron_benchmark_configure_host_firewall | default(true) | bool)
+      register: aeron_bootstrap_cidr_file
+
+    - name: Remove benchmark ingress CIDR file when host firewall management disabled
+      ansible.builtin.file:
+        path: "{{ aeron_dir }}/benchmark-ingress-cidr"
+        state: absent
+      when: not (aeron_benchmark_configure_host_firewall | default(true) | bool)
+      register: aeron_bootstrap_cidr_absent
+
+    - name: Install aeron-benchmark-bootstrap.sh
+      ansible.builtin.template:
+        src: aeron-benchmark-bootstrap.sh.j2
+        dest: /usr/local/sbin/aeron-benchmark-bootstrap.sh
+        mode: "0755"
+      register: aeron_bootstrap_script
+
+    - name: Install aeron-benchmark-bootstrap.service
+      ansible.builtin.template:
+        src: aeron-benchmark-bootstrap.service.j2
+        dest: /etc/systemd/system/aeron-benchmark-bootstrap.service
+        mode: "0644"
+      register: aeron_bootstrap_unit
+
+    - name: Remove legacy standalone IRQ unit (superseded by bootstrap)
+      ansible.builtin.file:
+        path: /etc/systemd/system/aeron-irq-default-smp-affinity.service
+        state: absent
+      register: aeron_irq_legacy_unit_removed
+
+    - name: Stop and disable legacy aeron-irq-default-smp-affinity if installed
+      ansible.builtin.systemd:
+        name: aeron-irq-default-smp-affinity
+        enabled: false
+        state: stopped
+      failed_when: false
+      register: aeron_irq_legacy_stopped
+
+    - name: Reload systemd after bootstrap or unit removals
+      ansible.builtin.systemd:
+        daemon_reload: true
+      when: >-
+        (aeron_bootstrap_unit.changed | default(false)) or (aeron_bootstrap_script.changed | default(false))
+        or (aeron_irq_script.changed | default(false)) or (aeron_irq_legacy_unit_removed.changed | default(false))
+        or (aeron_irq_hk_cpus_file.changed | default(false)) or (aeron_isolated_cpus_file.changed | default(false))
+        or (aeron_cpu_profile_file.changed | default(false))
+
+    - name: Enable and start Aeron benchmark bootstrap (oneshot at boot + now)
+      ansible.builtin.systemd:
+        name: aeron-benchmark-bootstrap
+        enabled: true
+        state: started
 
 - name: Set ulimits for Aeron
   pam_limits:

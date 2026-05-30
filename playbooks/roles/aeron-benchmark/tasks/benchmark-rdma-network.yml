@@ -1,0 +1,105 @@
+---
+- name: Configure benchmark RDMA fabric interface
+  ansible.builtin.shell: |
+    set -euo pipefail
+
+    RDMA_INTERFACE="{{ benchmark_cloud_init_rdma_interface | default('eth1') }}"
+    RDMA_IPV4_PREFIX="{{ benchmark_cloud_init_rdma_ipv4_prefix | default('') }}"
+    RDMA_IPV4_PREFIX_LENGTH="{{ benchmark_cloud_init_rdma_prefix_length | default(24) }}"
+    RDMA_MTU="{{ benchmark_cloud_init_rdma_mtu | default(4220) }}"
+
+    if [ -z "$(printf '%s' "${RDMA_IPV4_PREFIX}" | tr -d '[:space:]')" ]; then
+      echo "RDMA IPv4 prefix empty; skipping netplan configuration"
+      exit 0
+    fi
+
+    modprobe ib_core || true
+    modprobe rdma_cm || true
+    modprobe ib_uverbs || true
+    modprobe mlx5_core || true
+    modprobe mlx5_ib || true
+
+    cat >/etc/modules-load.d/aeron-rdma.conf <<'EOF'
+    ib_core
+    rdma_cm
+    ib_uverbs
+    mlx5_core
+    mlx5_ib
+    EOF
+
+    primary_if="$(ip -4 route show default 0.0.0.0/0 2>/dev/null | awk '{print $5; exit}')"
+    if [ -z "${primary_if}" ]; then
+      primary_if="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i=1; i<=NF; i++) if ($i == "dev") {print $(i+1); exit}}')"
+    fi
+    primary_ip="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i=1; i<=NF; i++) if ($i == "src") {print $(i+1); exit}}')"
+    if [ -z "${primary_ip}" ] && [ -n "${primary_if}" ]; then
+      primary_ip="$(ip -4 -o addr show dev "${primary_if}" scope global | awk '{sub(/\/.*/, "", $4); print $4; exit}')"
+    fi
+    last_octet="$(printf '%s' "${primary_ip}" | awk -F. 'NF == 4 {print $4}')"
+
+    if [ -e "/sys/class/net/${RDMA_INTERFACE}/address" ]; then
+      rdma_source_if="${RDMA_INTERFACE}"
+    else
+      candidates="$(for path in /sys/class/infiniband/*/device/net/*; do
+        [ -e "${path}" ] || continue
+        dev="$(basename "${path}")"
+        [ "${dev}" = "${primary_if}" ] && continue
+        [ "${dev}" = "lo" ] && continue
+        [ -e "/sys/class/net/${dev}/address" ] || continue
+        printf '%s\n' "${dev}"
+      done | sort -u)"
+      preferred="$(printf '%s\n' "${candidates}" | grep -E '(f0np0|p0|f0)$' | sort -V | tail -1 || true)"
+      rdma_source_if="${preferred}"
+      if [ -z "${rdma_source_if}" ]; then
+        rdma_source_if="$(printf '%s\n' "${candidates}" | sort -V | head -1 || true)"
+      fi
+    fi
+
+    if [ -z "${last_octet}" ] || [ -z "${rdma_source_if}" ]; then
+      echo "ERROR: unable to derive RDMA netplan config primary_ip=${primary_ip} primary_if=${primary_if} rdma_source_if=${rdma_source_if}" >&2
+      exit 1
+    fi
+
+    rdma_mac="$(cat "/sys/class/net/${rdma_source_if}/address")"
+    rdma_addr="${RDMA_IPV4_PREFIX}.${last_octet}/${RDMA_IPV4_PREFIX_LENGTH}"
+    netplan_file="/etc/netplan/60-rdma-${RDMA_INTERFACE}.yaml"
+    tmp_file="$(mktemp)"
+    cat >"${tmp_file}" <<EOF
+    network:
+      version: 2
+      ethernets:
+        ${RDMA_INTERFACE}:
+          match:
+            macaddress: "${rdma_mac}"
+          set-name: "${RDMA_INTERFACE}"
+          dhcp4: false
+          dhcp6: false
+          addresses:
+            - "${rdma_addr}"
+          mtu: ${RDMA_MTU}
+          optional: true
+    EOF
+
+    changed=0
+    if [ ! -f "${netplan_file}" ] || ! cmp -s "${tmp_file}" "${netplan_file}"; then
+      install -m 0600 "${tmp_file}" "${netplan_file}"
+      changed=1
+    fi
+    rm -f "${tmp_file}"
+
+    netplan generate
+    netplan apply
+    udevadm settle || true
+    ip addr replace "${rdma_addr}" dev "${RDMA_INTERFACE}" || true
+    ip link set dev "${RDMA_INTERFACE}" mtu "${RDMA_MTU}" up || true
+
+    if [ "${changed}" = "1" ]; then
+      echo rdma-netplan-updated
+    fi
+    echo "Configured RDMA netdev ${rdma_source_if} as ${RDMA_INTERFACE} address=${rdma_addr} mtu=${RDMA_MTU} mac=${rdma_mac}"
+    command -v rdma >/dev/null 2>&1 && rdma link || true
+    ip -br addr show "${RDMA_INTERFACE}" || true
+  args:
+    executable: /bin/bash
+  register: benchmark_rdma_network
+  changed_when: "'rdma-netplan-updated' in benchmark_rdma_network.stdout"

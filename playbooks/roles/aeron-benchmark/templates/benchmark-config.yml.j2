@@ -17,7 +17,7 @@ aeron_sender_io_vector_capacity: {{ aeron_sender_io_vector_capacity }}
 aeron_socket_so_sndbuf: "{{ aeron_socket_so_sndbuf | default('2m') }}"
 aeron_socket_so_rcvbuf: "{{ aeron_socket_so_rcvbuf | default('2m') }}"
 
-# CPU isolation (when apply_cpu_isolation_grub is enabled)
+# CPU isolation (GRUB when grub_dynamic_cpu_isolation; values computed on benchmark nodes)
 housekeeping_cpus: "{{ housekeeping_cpus }}"
 isolated_cpus: "{{ isolated_cpus }}"
 irq_affinity: "{{ irq_affinity }}"

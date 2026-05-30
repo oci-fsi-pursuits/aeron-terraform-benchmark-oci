@@ -1,0 +1,141 @@
+---
+- name: Wait for benchmark data block volume device
+  ansible.builtin.shell: |
+    set -e
+    dev="{{ benchmark_block_volume_device | default('/dev/oracleoci/oraclevdb') }}"
+    if [ "${dev}" = "auto" ]; then
+      for _attempt in $(seq 1 90); do
+        found="$(
+          target_bytes=$(( {{ benchmark_block_volume_size_gb | default(0) | int }} * 1024 * 1024 * 1024 ))
+          root_source="$(findmnt -n -o SOURCE / || true)"
+          root_parent=""
+          if [ -n "${root_source}" ]; then
+            root_parent_name="$(lsblk -no PKNAME "${root_source}" 2>/dev/null | head -n 1 || true)"
+            if [ -n "${root_parent_name}" ]; then
+              root_parent="/dev/${root_parent_name}"
+            fi
+          fi
+          while read -r candidate candidate_type candidate_size; do
+            [ "${candidate_type}" = "mpath" ] || continue
+            [ "${target_bytes}" -le 0 ] || [ "${candidate_size}" = "${target_bytes}" ] || continue
+            if lsblk -nrpo MOUNTPOINTS "${candidate}" | grep -q '[^[:space:]]'; then
+              continue
+            fi
+            printf '%s\n' "${candidate}"
+            exit 0
+          done < <(lsblk -bprno NAME,TYPE,SIZE)
+          while read -r candidate candidate_type candidate_size; do
+            [ "${candidate_type}" = "disk" ] || continue
+            [ "${candidate}" != "${root_parent}" ] || continue
+            [ "${target_bytes}" -le 0 ] || [ "${candidate_size}" = "${target_bytes}" ] || continue
+            if lsblk -nrpo MOUNTPOINTS "${candidate}" | tail -n +2 | grep -q '[^[:space:]]'; then
+              continue
+            fi
+            printf '%s\n' "${candidate}"
+            exit 0
+          done < <(lsblk -bprno NAME,TYPE,SIZE)
+        )"
+        if [ -n "${found}" ] && [ -b "${found}" ]; then
+          printf '%s\n' "${found}" >/run/aeron-benchmark-data-device
+          exit 0
+        fi
+        sleep 2
+      done
+      echo "Expected an unformatted benchmark data disk, but none appeared" >&2
+      lsblk -o NAME,TYPE,SIZE,FSTYPE,MOUNTPOINTS >&2 || true
+      exit 1
+    fi
+    for _attempt in $(seq 1 60); do
+      if [ -b "${dev}" ]; then
+        printf '%s\n' "${dev}" >/run/aeron-benchmark-data-device
+        exit 0
+      fi
+      found="$(
+        target_bytes=$(( {{ benchmark_block_volume_size_gb | default(0) | int }} * 1024 * 1024 * 1024 ))
+        while read -r candidate candidate_type candidate_size; do
+          [ "${candidate_type}" = "mpath" ] || continue
+          [ "${target_bytes}" -le 0 ] || [ "${candidate_size}" = "${target_bytes}" ] || continue
+          printf '%s\n' "${candidate}"
+          exit 0
+        done < <(lsblk -bprno NAME,TYPE,SIZE)
+      )"
+      if [ -n "${found}" ] && [ -b "${found}" ]; then
+        printf '%s\n' "${found}" >/run/aeron-benchmark-data-device
+        exit 0
+      fi
+      sleep 2
+    done
+    echo "Expected benchmark data block device not found: ${dev} (or matching multipath volume)" >&2
+    lsblk -o NAME,TYPE,SIZE,FSTYPE,MOUNTPOINTS >&2 || true
+    exit 1
+  args:
+    executable: /bin/bash
+  changed_when: false
+
+- name: Create filesystem on benchmark data block volume when empty
+  ansible.builtin.shell: |
+    set -e
+    dev="$(cat /run/aeron-benchmark-data-device)"
+    fstype="$(blkid -c /dev/null -s TYPE -o value "${dev}" 2>/dev/null || true)"
+    if [ -z "${fstype}" ]; then
+      mkfs.ext4 -F -L AERON_DATA "${dev}"
+    fi
+    udevadm settle || true
+    blkid -c /dev/null "${dev}" >/dev/null
+  args:
+    executable: /bin/bash
+  register: benchmark_data_mkfs
+  changed_when: "'Creating filesystem' in benchmark_data_mkfs.stdout or 'Creating filesystem' in benchmark_data_mkfs.stderr"
+
+- name: Ensure benchmark data filesystem label is present
+  ansible.builtin.shell: |
+    set -e
+    dev="$(cat /run/aeron-benchmark-data-device)"
+    fstype="$(blkid -c /dev/null -s TYPE -o value "${dev}")"
+    label="$(blkid -c /dev/null -s LABEL -o value "${dev}" 2>/dev/null || true)"
+    if [ "${fstype}" = "ext2" ] || [ "${fstype}" = "ext3" ] || [ "${fstype}" = "ext4" ]; then
+      if [ "${label}" != "AERON_DATA" ]; then
+        e2label "${dev}" AERON_DATA
+        echo label-updated
+      fi
+    fi
+    udevadm settle || true
+    blkid -c /dev/null "${dev}" >/dev/null
+  args:
+    executable: /bin/bash
+  register: benchmark_data_label
+  changed_when: "'label-updated' in benchmark_data_label.stdout"
+
+- name: Read benchmark data filesystem UUID
+  ansible.builtin.shell: |
+    set -e
+    dev="$(cat /run/aeron-benchmark-data-device)"
+    blkid -c /dev/null -s UUID -o value "${dev}"
+  args:
+    executable: /bin/bash
+  register: benchmark_data_uuid
+  changed_when: false
+
+- name: Create benchmark data mount point
+  ansible.builtin.file:
+    path: "{{ benchmark_block_volume_mount_path | default('/mnt/aeron-cluster') }}"
+    state: directory
+    owner: "{{ ssh_username | default('ubuntu') }}"
+    group: "{{ ssh_username | default('ubuntu') }}"
+    mode: '0755'
+
+- name: Mount benchmark data block volume
+  ansible.posix.mount:
+    path: "{{ benchmark_block_volume_mount_path | default('/mnt/aeron-cluster') }}"
+    src: "UUID={{ benchmark_data_uuid.stdout }}"
+    fstype: ext4
+    opts: "{{ benchmark_block_volume_mount_opts | default('defaults,noatime,nodiratime,nofail,stripe=256') }}"
+    state: mounted
+
+- name: Ensure benchmark data mount ownership
+  ansible.builtin.file:
+    path: "{{ benchmark_block_volume_mount_path | default('/mnt/aeron-cluster') }}"
+    state: directory
+    owner: "{{ ssh_username | default('ubuntu') }}"
+    group: "{{ ssh_username | default('ubuntu') }}"
+    mode: '0755'

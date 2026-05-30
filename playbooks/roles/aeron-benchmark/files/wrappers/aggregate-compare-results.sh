@@ -30,7 +30,7 @@ if agg is None:
     sys.exit(1)
 
 def extract_metrics(report_path: pathlib.Path):
-    p50 = p99 = p999 = maxv = None
+    p50 = p99 = p999 = p9999 = maxv = None
     for line in report_path.read_text(errors="ignore").splitlines():
         s = line.strip()
         if s.startswith("#[Max"):
@@ -42,20 +42,25 @@ def extract_metrics(report_path: pathlib.Path):
             if len(parts) < 2:
                 continue
             val = float(parts[0])
-            pct = parts[1]
-            if pct == "0.500000000000":
+            try:
+                pct = float(parts[1])
+            except ValueError:
+                continue
+            if p50 is None and pct >= 0.50:
                 p50 = val
-            elif pct == "0.990625000000":
+            elif p99 is None and pct >= 0.99:
                 p99 = val
-            elif pct == "0.999023437500":
+            elif p999 is None and pct >= 0.999:
                 p999 = val
-    return p50, p99, p999, maxv
+            elif p9999 is None and pct >= 0.9999:
+                p9999 = val
+    return p50, p99, p999, p9999, maxv
 
-print("archive,scenario,valid_runs,median_p50_us,median_p99_us,median_p999_us,median_max_us")
+print("archive,scenario,valid_runs,median_p50_us,median_p99_us,median_p999_us,median_p9999_us,median_max_us")
 for arg in sys.argv[1:]:
     tar_path = pathlib.Path(arg).expanduser().resolve()
     if not tar_path.exists():
-        print(f"{tar_path.name},ERROR:not-found,0,,,,")
+        print(f"{tar_path.name},ERROR:not-found,0,,,,,")
         continue
 
     with tempfile.TemporaryDirectory(prefix="aeron-compare-") as td:
@@ -74,25 +79,30 @@ for arg in sys.argv[1:]:
         for scenario in sorted(set(scenario_dirs)):
             metrics = []
             for run_dir in sorted(scenario.glob("run-*")):
-                if not any(x.suffix == ".hdr" for x in run_dir.iterdir() if x.is_file()):
+                hdr_inputs = [x for x in run_dir.iterdir() if x.is_file() and x.name.endswith(".hdr")]
+                if not hdr_inputs:
                     continue
                 subprocess.run([str(agg), str(run_dir)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
-                reports = list(run_dir.glob("*-report.hgrm"))
+                reports = list(run_dir.glob("*-report.hgrm")) or list(run_dir.glob("*-report.hgrm.FAIL"))
                 if not reports:
                     continue
-                p50, p99, p999, maxv = extract_metrics(reports[0])
+                p50, p99, p999, p9999, maxv = extract_metrics(reports[0])
                 if None not in (p50, p99, p999, maxv):
-                    metrics.append((p50, p99, p999, maxv))
+                    metrics.append((p50, p99, p999, p9999, maxv))
 
             if not metrics:
-                print(f"{tar_path.name},{scenario.name},0,,,,")
+                print(f"{tar_path.name},{scenario.name},0,,,,,")
                 continue
+
+            p9999_vals = [m[3] for m in metrics if m[3] is not None]
+            p9999_cell = f"{statistics.median(p9999_vals):.3f}" if p9999_vals else ""
 
             print(
                 f"{tar_path.name},{scenario.name},{len(metrics)},"
                 f"{statistics.median([m[0] for m in metrics]):.3f},"
                 f"{statistics.median([m[1] for m in metrics]):.3f},"
                 f"{statistics.median([m[2] for m in metrics]):.3f},"
-                f"{statistics.median([m[3] for m in metrics]):.3f}"
+                f"{p9999_cell},"
+                f"{statistics.median([m[4] for m in metrics]):.3f}"
             )
 PY

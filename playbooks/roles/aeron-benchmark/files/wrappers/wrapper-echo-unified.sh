@@ -105,19 +105,43 @@ build_cpu_profile() {
   local host="$1"
   local user="$2"
   local key="$3"
-  local cpus threads
+  local cpus threads last start profile hk isolated pins
   cpus="$(ssh -i "$key" -o StrictHostKeyChecking=no "$user@$host" 'getconf _NPROCESSORS_ONLN')"
   threads="$(ssh -i "$key" -o StrictHostKeyChecking=no "$user@$host" \
     "lscpu | awk -F: '/Thread\\(s\\) per core:/{gsub(/^[ \\t]+/,\"\",\$2); print \$2; exit}'")"
+  last=$((cpus - 1))
 
-  if [[ "$threads" == "1" && "$cpus" -ge 16 ]]; then
-    echo "taskset=0-3;nonisolated=0-15;conductor=4;sender=5;receiver=6;app=7;cpu_node=0"
+  profile="$(ssh -i "$key" -o StrictHostKeyChecking=no "$user@$host" 'cat /opt/aeron/benchmark-cpu-profile 2>/dev/null || true' | tr -d '[:space:]')"
+  hk="$(ssh -i "$key" -o StrictHostKeyChecking=no "$user@$host" 'cat /opt/aeron/housekeeping-cpus 2>/dev/null || true' | tr -d '[:space:]')"
+  isolated="$(ssh -i "$key" -o StrictHostKeyChecking=no "$user@$host" 'cat /opt/aeron/isolated-cpus 2>/dev/null || true' | tr -d '[:space:]')"
+
+  # Validated OCI VM profile from the benchmark tracking doc:
+  # 16 CPUs, SMT off, housekeeping 6-8, isolated hot cores 0-5,9-15.
+  # Keep orchestration/JVM helper work on housekeeping, and pin echo hot roles to 1,2,3,4.
+  if [[ "$threads" == "1" && "$cpus" -eq 16 && ( "$profile" == "oci_vm_16_smt_off" || "$hk" == "6-8" || "$isolated" == "0-5,9-15" ) ]]; then
+    echo "taskset=6,7,8;nonisolated=6,7,8;conductor=1;sender=2;receiver=3;app=4;cpu_node=0"
+    return
+  fi
+
+  # Keep low CPUs for OS/IRQ housekeeping on legacy contiguous profiles. Pin benchmark
+  # driver/application threads above that band to avoid sharing with host noise.
+  if [[ "$threads" == "2" && "$cpus" -ge 24 ]]; then
+    start=8
+    echo "taskset=${start}-${last};nonisolated=${start}-${last};conductor=${start};sender=$((start + 2));receiver=$((start + 4));app=$((start + 6));cpu_node=0"
+  elif [[ "$cpus" -ge 24 ]]; then
+    start=8
+    echo "taskset=${start}-${last};nonisolated=${start}-${last};conductor=${start};sender=$((start + 1));receiver=$((start + 2));app=$((start + 3));cpu_node=0"
+  elif [[ "$threads" == "1" && "$cpus" -ge 16 ]]; then
+    start=6
+    echo "taskset=${start}-${last};nonisolated=${start}-${last};conductor=${start};sender=$((start + 1));receiver=$((start + 2));app=$((start + 3));cpu_node=0"
   elif [[ "$threads" == "2" && "$cpus" -ge 20 ]]; then
-    echo "taskset=0-3;nonisolated=0-3,4,6,8,10,12,14,16,18;conductor=4;sender=6;receiver=8;app=10;cpu_node=0"
+    start=8
+    echo "taskset=${start}-${last};nonisolated=${start}-${last};conductor=${start};sender=$((start + 2));receiver=$((start + 4));app=$((start + 6));cpu_node=0"
   elif [[ "$threads" == "1" && "$cpus" -ge 10 ]]; then
-    echo "taskset=0-1;nonisolated=0-9;conductor=2;sender=3;receiver=4;app=5;cpu_node=0"
+    start=4
+    echo "taskset=${start}-${last};nonisolated=${start}-${last};conductor=${start};sender=$((start + 1));receiver=$((start + 2));app=$((start + 3));cpu_node=0"
   else
-    echo "taskset=0-1;nonisolated=0-$((cpus-1));conductor=2;sender=3;receiver=4;app=5;cpu_node=0"
+    echo "taskset=0-1;nonisolated=0-${last};conductor=2;sender=3;receiver=4;app=5;cpu_node=0"
   fi
 }
 
@@ -127,12 +151,18 @@ parse_profile_kv() {
   awk -F'[=;]' -v k="$key" '{for (i=1;i<=NF;i+=2) if ($i==k) {print $(i+1); exit}}' <<<"$input"
 }
 
+parse_pin_csv() {
+  local input="$1"
+  local index="$2"
+  awk -F',' -v i="$index" '{gsub(/[[:space:]]/, "", $i); print $i}' <<<"$input"
+}
+
 tune_socket_buffers_remote() {
   local user="$1"
   local key_file="$2"
   local host="$3"
   ssh -i "$key_file" -o StrictHostKeyChecking=no "$user@$host" \
-    "sudo sysctl -w net.core.rmem_max=4194304 net.core.wmem_max=4194304 net.core.rmem_default=4194304 net.core.wmem_default=4194304 >/dev/null"
+    "sudo sysctl -w net.core.rmem_max=33554432 net.core.wmem_max=33554432 net.core.rmem_default=8388608 net.core.wmem_default=8388608 >/dev/null"
 }
 
 # Stale drivers + sticky /dev/shm: sudo-wipe default dir and the home AERON_DIR used when wrappers set it.
@@ -154,17 +184,43 @@ aeron_normalize_named_iface() {
   fi
 }
 
+numactl_bind_valid_remote() {
+  local user="$1"
+  local key_file="$2"
+  local host="$3"
+  local cpus="$4"
+  [[ -z "${cpus}" ]] && return 1
+  ssh -i "$key_file" -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=15 "$user@$host" \
+    "numactl --physcpubind='${cpus}' --show >/dev/null 2>&1"
+}
+
 check_numactl_bind_remote() {
   local user="$1"
   local key_file="$2"
   local host="$3"
   local cpus="$4"
   local label="$5"
-  if ! ssh -i "$key_file" -o StrictHostKeyChecking=no "$user@$host" \
-      "numactl --physcpubind='${cpus}' --show >/dev/null"; then
+  if ! numactl_bind_valid_remote "$user" "$key_file" "$host" "$cpus"; then
     echo "ERROR: ${label} NON_ISOLATED_CPU_CORES='${cpus}' is invalid for numactl on ${host}" >&2
     exit 1
   fi
+}
+
+# Try candidates in order. systemd/cgroup + isolcpus often leave only 0-1 (housekeeping) usable over ssh.
+pick_numactl_physcpubind_remote() {
+  local user="$1"
+  local key_file="$2"
+  local host="$3"
+  shift 3
+  local c
+  for c in "$@"; do
+    [[ -z "$c" ]] && continue
+    if numactl_bind_valid_remote "$user" "$key_file" "$host" "$c"; then
+      printf '%s' "$c"
+      return 0
+    fi
+  done
+  return 1
 }
 
 # -------- Inputs / overrides --------
@@ -173,7 +229,6 @@ CONTEXT="${CONTEXT:-echo-unified}"
 CLIENT_MODE="${CLIENT_MODE:-java}"
 SERVER_MODE="${SERVER_MODE:-java}"
 MTU_VALUE="${MTU_VALUE:-8K}"
-ONLOAD_COMMAND="${ONLOAD_COMMAND:-env}"
 SHOW_CONFIG_ONLY="${SHOW_CONFIG_ONLY:-0}"
 
 SSH_USER="${SSH_USER:-ubuntu}"
@@ -210,19 +265,89 @@ else
   AERON_SSH_TASKSET_CPUS="${AERON_SSH_TASKSET_CPUS:-$CLIENT_TASKSET}"
 fi
 
-CLIENT_NON_ISOLATED_CPU_CORES="${CLIENT_NON_ISOLATED_CPU_CORES:-$(parse_profile_kv "$client_auto" nonisolated)}"
-CLIENT_DRIVER_CONDUCTOR_CPU_CORE="${CLIENT_DRIVER_CONDUCTOR_CPU_CORE:-$(parse_profile_kv "$client_auto" conductor)}"
-CLIENT_DRIVER_SENDER_CPU_CORE="${CLIENT_DRIVER_SENDER_CPU_CORE:-$(parse_profile_kv "$client_auto" sender)}"
-CLIENT_DRIVER_RECEIVER_CPU_CORE="${CLIENT_DRIVER_RECEIVER_CPU_CORE:-$(parse_profile_kv "$client_auto" receiver)}"
-CLIENT_LOAD_TEST_RIG_MAIN_CPU_CORE="${CLIENT_LOAD_TEST_RIG_MAIN_CPU_CORE:-$(parse_profile_kv "$client_auto" app)}"
-CLIENT_CPU_NODE="${CLIENT_CPU_NODE:-$(parse_profile_kv "$client_auto" cpu_node)}"
+# benchmark-config.env may set NON_ISOLATED from Terraform benchmark_ocpus. Narrow until numactl accepts
+# (live vCPU mismatch, isolcpus, or ssh/cgroup cpuset).
+_auto_client_noniso="$(parse_profile_kv "$client_auto" nonisolated)"
+_cfg_client_noniso="${CLIENT_NON_ISOLATED_CPU_CORES-}"
+_CLIENT_RESOLVED="$(pick_numactl_physcpubind_remote "${SSH_USER}" "${SSH_KEY_FILE}" "${SSH_CLIENT_NODE}" \
+  "${_cfg_client_noniso}" "${_auto_client_noniso}" "0-7" "0-3" "0-1" "0")" || {
+  echo "wrapper-echo-unified: ERROR no valid numactl --physcpubind on ${SSH_CLIENT_NODE} (install numactl?)" >&2
+  exit 1
+}
+if [[ -n "${_cfg_client_noniso}" && "${_CLIENT_RESOLVED}" != "${_cfg_client_noniso}" ]]; then
+  echo "wrapper-echo-unified: WARNING client NON_ISOLATED_CPU_CORES ${_cfg_client_noniso} -> ${_CLIENT_RESOLVED} (cpuset / isolcpus / shape)" >&2
+fi
+CLIENT_NON_ISOLATED_CPU_CORES="${_CLIENT_RESOLVED}"
+case "${_CLIENT_RESOLVED}" in
+  0)
+    CLIENT_DRIVER_CONDUCTOR_CPU_CORE=0
+    CLIENT_DRIVER_SENDER_CPU_CORE=0
+    CLIENT_DRIVER_RECEIVER_CPU_CORE=0
+    CLIENT_LOAD_TEST_RIG_MAIN_CPU_CORE=0
+    CLIENT_CPU_NODE=0
+    ;;
+  0-1)
+    CLIENT_DRIVER_CONDUCTOR_CPU_CORE=0
+    CLIENT_DRIVER_SENDER_CPU_CORE=0
+    CLIENT_DRIVER_RECEIVER_CPU_CORE=1
+    CLIENT_LOAD_TEST_RIG_MAIN_CPU_CORE=1
+    CLIENT_CPU_NODE=0
+    ;;
+  *)
+    CLIENT_DRIVER_CONDUCTOR_CPU_CORE="${CLIENT_DRIVER_CONDUCTOR_CPU_CORE:-$(parse_profile_kv "$client_auto" conductor)}"
+    CLIENT_DRIVER_SENDER_CPU_CORE="${CLIENT_DRIVER_SENDER_CPU_CORE:-$(parse_profile_kv "$client_auto" sender)}"
+    CLIENT_DRIVER_RECEIVER_CPU_CORE="${CLIENT_DRIVER_RECEIVER_CPU_CORE:-$(parse_profile_kv "$client_auto" receiver)}"
+    CLIENT_LOAD_TEST_RIG_MAIN_CPU_CORE="${CLIENT_LOAD_TEST_RIG_MAIN_CPU_CORE:-$(parse_profile_kv "$client_auto" app)}"
+    CLIENT_CPU_NODE="${CLIENT_CPU_NODE:-$(parse_profile_kv "$client_auto" cpu_node)}"
+    ;;
+esac
+if [[ -n "${BENCHMARK_ECHO_CLIENT_PINS:-}" ]]; then
+  CLIENT_DRIVER_CONDUCTOR_CPU_CORE="$(parse_pin_csv "${BENCHMARK_ECHO_CLIENT_PINS}" 1)"
+  CLIENT_DRIVER_SENDER_CPU_CORE="$(parse_pin_csv "${BENCHMARK_ECHO_CLIENT_PINS}" 2)"
+  CLIENT_DRIVER_RECEIVER_CPU_CORE="$(parse_pin_csv "${BENCHMARK_ECHO_CLIENT_PINS}" 3)"
+  CLIENT_LOAD_TEST_RIG_MAIN_CPU_CORE="$(parse_pin_csv "${BENCHMARK_ECHO_CLIENT_PINS}" 4)"
+fi
 
-SERVER_NON_ISOLATED_CPU_CORES="${SERVER_NON_ISOLATED_CPU_CORES:-$(parse_profile_kv "$server_auto" nonisolated)}"
-SERVER_DRIVER_CONDUCTOR_CPU_CORE="${SERVER_DRIVER_CONDUCTOR_CPU_CORE:-$(parse_profile_kv "$server_auto" conductor)}"
-SERVER_DRIVER_SENDER_CPU_CORE="${SERVER_DRIVER_SENDER_CPU_CORE:-$(parse_profile_kv "$server_auto" sender)}"
-SERVER_DRIVER_RECEIVER_CPU_CORE="${SERVER_DRIVER_RECEIVER_CPU_CORE:-$(parse_profile_kv "$server_auto" receiver)}"
-SERVER_ECHO_CPU_CORE="${SERVER_ECHO_CPU_CORE:-$(parse_profile_kv "$server_auto" app)}"
-SERVER_CPU_NODE="${SERVER_CPU_NODE:-$(parse_profile_kv "$server_auto" cpu_node)}"
+_auto_server_noniso="$(parse_profile_kv "$server_auto" nonisolated)"
+_cfg_server_noniso="${SERVER_NON_ISOLATED_CPU_CORES-}"
+_SERVER_RESOLVED="$(pick_numactl_physcpubind_remote "${SSH_USER}" "${SSH_KEY_FILE}" "${SSH_SERVER_NODE}" \
+  "${_cfg_server_noniso}" "${_auto_server_noniso}" "0-7" "0-3" "0-1" "0")" || {
+  echo "wrapper-echo-unified: ERROR no valid numactl --physcpubind on ${SSH_SERVER_NODE} (install numactl?)" >&2
+  exit 1
+}
+if [[ -n "${_cfg_server_noniso}" && "${_SERVER_RESOLVED}" != "${_cfg_server_noniso}" ]]; then
+  echo "wrapper-echo-unified: WARNING server NON_ISOLATED_CPU_CORES ${_cfg_server_noniso} -> ${_SERVER_RESOLVED} (cpuset / isolcpus / shape)" >&2
+fi
+SERVER_NON_ISOLATED_CPU_CORES="${_SERVER_RESOLVED}"
+case "${_SERVER_RESOLVED}" in
+  0)
+    SERVER_DRIVER_CONDUCTOR_CPU_CORE=0
+    SERVER_DRIVER_SENDER_CPU_CORE=0
+    SERVER_DRIVER_RECEIVER_CPU_CORE=0
+    SERVER_ECHO_CPU_CORE=0
+    SERVER_CPU_NODE=0
+    ;;
+  0-1)
+    SERVER_DRIVER_CONDUCTOR_CPU_CORE=0
+    SERVER_DRIVER_SENDER_CPU_CORE=0
+    SERVER_DRIVER_RECEIVER_CPU_CORE=1
+    SERVER_ECHO_CPU_CORE=1
+    SERVER_CPU_NODE=0
+    ;;
+  *)
+    SERVER_DRIVER_CONDUCTOR_CPU_CORE="${SERVER_DRIVER_CONDUCTOR_CPU_CORE:-$(parse_profile_kv "$server_auto" conductor)}"
+    SERVER_DRIVER_SENDER_CPU_CORE="${SERVER_DRIVER_SENDER_CPU_CORE:-$(parse_profile_kv "$server_auto" sender)}"
+    SERVER_DRIVER_RECEIVER_CPU_CORE="${SERVER_DRIVER_RECEIVER_CPU_CORE:-$(parse_profile_kv "$server_auto" receiver)}"
+    SERVER_ECHO_CPU_CORE="${SERVER_ECHO_CPU_CORE:-$(parse_profile_kv "$server_auto" app)}"
+    SERVER_CPU_NODE="${SERVER_CPU_NODE:-$(parse_profile_kv "$server_auto" cpu_node)}"
+    ;;
+esac
+if [[ -n "${BENCHMARK_ECHO_SERVER_PINS:-}" ]]; then
+  SERVER_DRIVER_CONDUCTOR_CPU_CORE="$(parse_pin_csv "${BENCHMARK_ECHO_SERVER_PINS}" 1)"
+  SERVER_DRIVER_SENDER_CPU_CORE="$(parse_pin_csv "${BENCHMARK_ECHO_SERVER_PINS}" 2)"
+  SERVER_DRIVER_RECEIVER_CPU_CORE="$(parse_pin_csv "${BENCHMARK_ECHO_SERVER_PINS}" 3)"
+  SERVER_ECHO_CPU_CORE="$(parse_pin_csv "${BENCHMARK_ECHO_SERVER_PINS}" 4)"
+fi
 
 # -------- Export expected environment --------
 # Legacy bad benchmark-config.env (or bash/Jinja nesting) could leave "/24}" in URIs or "24}" in prefix → AsciiNumberFormatException.
@@ -342,6 +467,20 @@ tune_socket_buffers_remote "${SSH_SERVER_USER}" "${SSH_SERVER_KEY_FILE}" "${SSH_
 
 client_driver="$(map_driver_mode "${CLIENT_MODE}")"
 server_driver="$(map_driver_mode "${SERVER_MODE}")"
+
+# Pick Mellanox VMA (LD_PRELOAD) vs plain env for non-vma modes; --onload is always passed upstream.
+_wrapper_echo_pick_onload_command() {
+  local need=0
+  case "${CLIENT_MODE}" in *vma*|*-onload) need=1;; esac
+  case "${SERVER_MODE}" in *vma*|*-onload) need=1;; esac
+  if [[ "${need}" == "1" ]]; then
+    ONLOAD_COMMAND="${ONLOAD_COMMAND_VMA:-${ONLOAD_COMMAND:-env}}"
+  else
+    ONLOAD_COMMAND="${ONLOAD_COMMAND_PLAIN:-env}"
+  fi
+  export ONLOAD_COMMAND
+}
+_wrapper_echo_pick_onload_command
 
 echo "=== Unified Echo Wrapper ==="
 echo "client=${SSH_CLIENT_NODE} server=${SSH_SERVER_NODE}"

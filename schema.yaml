@@ -58,6 +58,7 @@ variableGroups:
     variables:
       - benchmark_ad
       - benchmark_node_count
+      - enable_cluster_raft_consensus
       - benchmark_shape
       - benchmark_ocpus
       - benchmark_memory_gb
@@ -80,6 +81,17 @@ variableGroups:
     variables:
       - use_existing_vcn
       - create_benchmark_cluster_placement_group
+      - enable_benchmark_cluster_network
+      - enable_benchmark_instance_pool
+      - enable_rdma_compute_cluster
+      - rdma_existing_compute_cluster_id
+      - rdma_enable_hpc_plugins
+      - benchmark_cloud_init_rdma
+      - benchmark_cloud_init_rdma_interface
+      - benchmark_cloud_init_rdma_configure_netplan
+      - benchmark_cloud_init_rdma_ipv4_prefix
+      - benchmark_cloud_init_rdma_prefix_length
+      - benchmark_cloud_init_rdma_mtu
       - vcn_compartment_ocid
       - existing_vcn_id
       - existing_public_subnet_id
@@ -101,10 +113,12 @@ variableGroups:
   - title: "Aeron Configuration"
     variables:
       - install_aeron
-      - run_benchmarks
+      - install_oci_cn_auth
+      - benchmark_tuning_profile
+      - run_smoke_test
+      - run_full_benchmark
       - run_benchmarks_matrix_modes
       - run_benchmarks_cluster_matrix
-      - pull_matrix_summary_for_terraform_output
       - benchmark_build_native_aeronmd
 
   - title: "Hidden Variables"
@@ -115,6 +129,10 @@ variableGroups:
       - use_instance_principal
       - default_image_name
       - benchmark_cluster_cpu_affinity
+      - grub_dynamic_cpu_isolation
+      - grub_housekeeping_fraction
+      - grub_housekeeping_floor
+      - grub_housekeeping_cpus_max
       - aeron_git_repo
       - aeron_git_branch
       - benchmarks_repo_url
@@ -126,8 +144,23 @@ variableGroups:
       - benchmark_echo_warmup_message_rate
       - benchmark_message_length
       - benchmark_message_rate
+      - full_benchmark_echo_runs
+      - full_benchmark_echo_iterations
+      - full_benchmark_echo_warmup_iterations
+      - full_benchmark_warmup_message_rate
+      - full_benchmark_message_length
+      - full_benchmark_message_rate
+      - full_benchmark_bench_profile
+      - full_benchmark_matrix_mode_timeout_sec
       - aeron_echo_udp_interface_prefix_length
       - aeron_echo_udp_named_interface
+      - benchmark_onload_command_vma
+      - benchmark_aeron_socket_so_sndbuf
+      - benchmark_aeron_socket_so_rcvbuf
+      - benchmark_aeron_rcv_initial_window_length
+      - benchmark_aeron_max_messages_per_send
+      - benchmark_aeron_receiver_io_vector_capacity
+      - benchmark_aeron_sender_io_vector_capacity
     visible: false
 
 variables:
@@ -284,11 +317,29 @@ variables:
   benchmark_node_count:
     type: integer
     title: "Number of Benchmark Nodes"
-    description: "Number of benchmark nodes to deploy (minimum 2 for client/receiver)"
+    description: "Number of benchmark nodes to deploy (minimum 2 for client/receiver). If Raft consensus is enabled, Terraform provisions at least 4 benchmark instances for client + node0/node1/node2."
     minimum: 2
     maximum: 10
     default: 2
     required: true
+
+  enable_cluster_raft_consensus:
+    type: boolean
+    title: "Enable 3-Member Cluster Consensus"
+    description: "Provision/render a 3-member Aeron Cluster benchmark topology (CLUSTER_SIZE=3, CLUSTER_BACKUP_NODES=0). This is separate from the default 1 member + ClusterBackupNode fallback topology."
+    default: false
+    required: false
+
+  benchmark_tuning_profile:
+    type: enum
+    title: "Benchmark Tuning Profile"
+    description: "auto selects bm_rdma when RDMA cloud-init is enabled and vm_stable otherwise. bm_rdma uses validated BM RDMA/VMA launch, native c-media-driver for cluster java_vma, /dev/shm fixup, static eth1 NUMA pins, and high-rate Aeron socket/batching values; vm_stable keeps VM-safe 2m/1 Aeron values."
+    enum:
+      - auto
+      - bm_rdma
+      - vm_stable
+    default: auto
+    required: false
 
   benchmark_shape:
     type: oci:core:instanceshape:name
@@ -454,6 +505,37 @@ variables:
       - static
     default: auto
 
+  grub_dynamic_cpu_isolation:
+    type: boolean
+    title: "Dynamic GRUB CPU isolation (benchmark nodes)"
+    description: "Write GRUB isolcpus/nohz_full/rcu_nocbs/irqaffinity from live logical CPU count. Housekeeping size scales with grub_housekeeping_fraction (no fixed vCPU tiers). Requires reboot after apply."
+    default: true
+
+  grub_housekeeping_fraction:
+    type: number
+    title: "GRUB housekeeping CPU fraction"
+    description: "Housekeeping uses ceil(N × fraction), bounded by floor and cap. Default 0.17 matches remediation handoff (~8 CPUs at 48 OCPU)."
+    default: 0.17
+    minimum: 0.01
+    maximum: 0.5
+    multipleOf: 0.01
+
+  grub_housekeeping_floor:
+    type: number
+    title: "GRUB housekeeping CPU floor"
+    description: "Minimum housekeeping CPUs (clamped to N). Default 2 per handoff."
+    default: 2
+    minimum: 1
+    maximum: 64
+
+  grub_housekeeping_cpus_max:
+    type: number
+    title: "GRUB housekeeping CPU cap (0 = none)"
+    description: "Maximum housekeeping CPUs (default 8 per handoff). Set 0 to disable upper cap."
+    default: 8
+    minimum: 0
+    maximum: 128
+
   # ==========================================================================
   # Network Configuration
   # ==========================================================================
@@ -469,9 +551,123 @@ variables:
     description: "Place benchmark VMs in an OCI cluster placement group in the benchmark AD (tighter physical proximity). Only available when creating a new VCN; cleared when you select Use Existing VCN."
     default: true
     visible:
+      and:
+        - eq:
+            - ${use_existing_vcn}
+            - false
+        - eq:
+            - ${enable_rdma_compute_cluster}
+            - false
+
+  enable_benchmark_cluster_network:
+    type: boolean
+    title: "Enable benchmark cluster network"
+    description: "Launch benchmark nodes through an OCI cluster network and instance pool. Use for BM.Optimized3.36 RDMA testing."
+    default: false
+
+  enable_benchmark_instance_pool:
+    type: boolean
+    title: "Enable benchmark instance pool"
+    description: "Launch benchmark nodes through a regular OCI instance pool. Do not enable this with benchmark cluster network."
+    default: false
+    visible:
       eq:
-        - ${use_existing_vcn}
+        - ${enable_benchmark_cluster_network}
         - false
+
+  enable_rdma_compute_cluster:
+    type: boolean
+    title: "Enable RDMA compute cluster for benchmark nodes"
+    description: "Launch benchmark nodes into an OCI compute cluster (recommended for RDMA-capable bare-metal shapes like BM.Optimized3.36)."
+    default: false
+    visible:
+      eq:
+        - ${enable_benchmark_cluster_network}
+        - false
+
+  rdma_existing_compute_cluster_id:
+    type: string
+    title: "Existing RDMA compute cluster OCID (optional)"
+    description: "Leave empty to create a new compute cluster in benchmark AD; set this to attach benchmark nodes to an existing compute cluster."
+    default: ""
+    visible:
+      eq:
+        - ${enable_rdma_compute_cluster}
+        - true
+
+  rdma_enable_hpc_plugins:
+    type: boolean
+    title: "Enable OCI RDMA instance agent plugins"
+    description: "Enable Compute HPC RDMA Authentication and Compute HPC RDMA Auto-Configuration plugins on benchmark nodes."
+    default: true
+    visible:
+      eq:
+        - ${enable_rdma_compute_cluster}
+        - true
+
+  benchmark_cloud_init_rdma:
+    type: boolean
+    title: "Configure RDMA networking in cloud-init"
+    description: "Ubuntu/BM.Optimized3 path: install RDMA packages/modules and configure the 100G RoCE interface from cloud-init instead of relying on Oracle Cloud Agent."
+    default: false
+
+  benchmark_cloud_init_rdma_interface:
+    type: string
+    title: "RDMA interface name"
+    description: "Target Linux netdev name for the RDMA/RoCE port. The working BM.Optimized3 profile uses eth1."
+    default: "eth1"
+    visible:
+      eq:
+        - ${benchmark_cloud_init_rdma}
+        - true
+
+  benchmark_cloud_init_rdma_configure_netplan:
+    type: boolean
+    title: "Create RDMA netplan"
+    description: "Match the selected RDMA NIC by MAC, rename it to the RDMA interface name, assign the RDMA fabric IP, set MTU, and bring it up."
+    default: true
+    visible:
+      eq:
+        - ${benchmark_cloud_init_rdma}
+        - true
+
+  benchmark_cloud_init_rdma_ipv4_prefix:
+    type: string
+    title: "RDMA IPv4 prefix"
+    description: "Prefix excluding host octet. Example: 10.34.100 makes primary 10.34.1.234 become RDMA 10.34.100.234/24."
+    default: ""
+    visible:
+      and:
+        - eq:
+            - ${benchmark_cloud_init_rdma}
+            - true
+        - eq:
+            - ${benchmark_cloud_init_rdma_configure_netplan}
+            - true
+
+  benchmark_cloud_init_rdma_prefix_length:
+    type: number
+    title: "RDMA IPv4 prefix length"
+    description: "Prefix length for the RDMA fabric interface."
+    default: 24
+    minimum: 1
+    maximum: 32
+    visible:
+      eq:
+        - ${benchmark_cloud_init_rdma}
+        - true
+
+  benchmark_cloud_init_rdma_mtu:
+    type: number
+    title: "RDMA interface MTU"
+    description: "MTU for the cloud-init configured RDMA interface. The working OCI BM.Optimized3 Ubuntu setup used 4220."
+    default: 4220
+    minimum: 1500
+    maximum: 9000
+    visible:
+      eq:
+        - ${benchmark_cloud_init_rdma}
+        - true
 
   vcn_compartment_ocid:
     type: oci:identity:compartment:id
@@ -624,6 +820,20 @@ variables:
     description: "Install Aeron from Git and build from source"
     default: true
 
+  install_oci_cn_auth:
+    type: boolean
+    title: "Install and enable oci-cn-auth"
+    description: "RDMA mode helper: install and start oci-cn-auth on benchmark/failover nodes (automated for RedHat/Oracle Linux images)."
+    default: false
+    visible:
+      and:
+        - eq:
+            - ${install_aeron}
+            - true
+        - eq:
+            - ${enable_rdma_compute_cluster}
+            - true
+
   aeron_git_repo:
     type: string
     title: "Aeron Git Repository"
@@ -657,10 +867,20 @@ variables:
       - "21"
     default: "17"
 
-  run_benchmarks:
+  run_smoke_test:
     type: boolean
-    title: "Run Benchmarks After Deployment"
-    description: "Automatically run Aeron benchmarks after installation"
+    title: "Run smoke test after deployment"
+    description: "Fast post-apply driver matrix (RUNS=1, ITERATIONS=1, WARMUP=1) to validate echo/cluster wiring. Independent of full benchmark."
+    default: true
+    visible:
+      eq:
+        - ${install_aeron}
+        - true
+
+  run_full_benchmark:
+    type: boolean
+    title: "Run full benchmark after deployment"
+    description: "Longer post-apply driver matrix (default 5×30×10 warmup) for baseline-style HDR results. When smoke is also enabled, smoke runs first; terraform-matrix-summary uses the full pass. Apply time can be many hours."
     default: false
     visible:
       eq:
@@ -670,32 +890,38 @@ variables:
   run_benchmarks_matrix_modes:
     type: string
     title: "Benchmark Driver Matrix"
-    description: "Comma-separated driver modes for automated run (java,java_vma,c,c_vma)"
-    default: "java,java_vma,c,c_vma"
+    description: "Comma-separated driver modes (default java,c). java_vma/c_vma use Mellanox VMA (LD_PRELOAD); preflight checks libvma on each host. Optional OpenOnload CLI if ONLOAD_COMMAND_VMA is overridden."
+    default: "java,c"
     visible:
-      eq:
-        - ${run_benchmarks}
-        - true
+      and:
+        - eq:
+            - ${install_aeron}
+            - true
+        - or:
+            - eq:
+                - ${run_smoke_test}
+                - true
+            - eq:
+                - ${run_full_benchmark}
+                - true
 
   run_benchmarks_cluster_matrix:
     type: boolean
     title: "Run Cluster Driver Matrix (Failover)"
-    description: "When failover node is enabled, run cluster matrix after echo matrix (strict). Turn off for echo-only CI."
+    description: "When failover node is enabled, run cluster matrix after echo for each enabled pass (smoke and/or full). Turn off for echo-only CI."
     default: true
     visible:
-      eq:
-        - ${run_benchmarks}
-        - true
-
-  pull_matrix_summary_for_terraform_output:
-    type: boolean
-    title: "Pull matrix summary for Terraform output"
-    description: "After the driver matrix, SSH from the Terraform client to the controller and populate terraform output benchmark_driver_matrix_summary (needs OpenSSH + python on the apply machine). Disable if apply runs in CI without SSH to the controller."
-    default: true
-    visible:
-      eq:
-        - ${run_benchmarks}
-        - true
+      and:
+        - eq:
+            - ${install_aeron}
+            - true
+        - or:
+            - eq:
+                - ${run_smoke_test}
+                - true
+            - eq:
+                - ${run_full_benchmark}
+                - true
 
   benchmark_echo_runs:
     type: number
@@ -733,6 +959,59 @@ variables:
     description: "MESSAGE_RATE: numeric msg/s (e.g. 100001) or shorthand (101K). Target throughput, not an exact total message count."
     default: "100001"
 
+  full_benchmark_echo_runs:
+    type: number
+    title: "Full benchmark RUNS"
+    description: "Outer RUNS for post-apply full benchmark matrix (run_full_benchmark=true)."
+    default: 5
+    minimum: 1
+
+  full_benchmark_echo_iterations:
+    type: number
+    title: "Full benchmark ITERATIONS"
+    description: "Measurement iterations per run for post-apply full benchmark matrix."
+    default: 30
+    minimum: 1
+
+  full_benchmark_echo_warmup_iterations:
+    type: number
+    title: "Full benchmark WARMUP_ITERATIONS"
+    description: "Warmup iterations before measurement for post-apply full benchmark matrix."
+    default: 10
+    minimum: 0
+
+  full_benchmark_warmup_message_rate:
+    type: string
+    title: "Full benchmark warmup message rate"
+    description: "WARMUP_MESSAGE_RATE label for full benchmark matrix (e.g. 25K)."
+    default: "25K"
+
+  full_benchmark_message_length:
+    type: number
+    title: "Full benchmark MESSAGE_LENGTH"
+    description: "Message size in bytes for post-apply full benchmark matrix."
+    default: 288
+    minimum: 1
+
+  full_benchmark_message_rate:
+    type: string
+    title: "Full benchmark MESSAGE_RATE"
+    description: "Target rate label for post-apply full benchmark matrix (e.g. 101K)."
+    default: "101K"
+
+  full_benchmark_bench_profile:
+    type: string
+    title: "Full benchmark BENCH_PROFILE"
+    description: "Bench profile name passed to wrappers for post-apply full benchmark matrix."
+    default: "custom"
+
+  full_benchmark_matrix_mode_timeout_sec:
+    type: number
+    title: "Full benchmark per-mode timeout (sec)"
+    description: "Wall-clock cap per driver mode during post-apply full benchmark matrix."
+    default: 7200
+    minimum: 60
+
   benchmark_build_native_aeronmd:
     type: boolean
     title: "Build native Aeron media driver (aeronmd)"
@@ -743,11 +1022,53 @@ variables:
         - ${install_aeron}
         - true
 
+  benchmark_onload_command_vma:
+    type: string
+    title: "VMA launch command override"
+    description: "Optional full ONLOAD_COMMAND_VMA override. Leave empty to derive from benchmark_tuning_profile and benchmark_vma_lib_path."
+    default: ""
+
+  benchmark_aeron_socket_so_sndbuf:
+    type: string
+    title: "Aeron send socket buffer override"
+    description: "Optional AERON_SOCKET_SO_SNDBUF override. Empty derives from benchmark_tuning_profile."
+    default: ""
+
+  benchmark_aeron_socket_so_rcvbuf:
+    type: string
+    title: "Aeron receive socket buffer override"
+    description: "Optional AERON_SOCKET_SO_RCVBUF override. Empty derives from benchmark_tuning_profile."
+    default: ""
+
+  benchmark_aeron_rcv_initial_window_length:
+    type: string
+    title: "Aeron receive initial window override"
+    description: "Optional AERON_RCV_INITIAL_WINDOW_LENGTH override. Empty derives from benchmark_tuning_profile."
+    default: ""
+
+  benchmark_aeron_max_messages_per_send:
+    type: string
+    title: "Aeron max messages per send override"
+    description: "Optional AERON_NETWORK_PUBLICATION_MAX_MESSAGES_PER_SEND override. Empty derives from benchmark_tuning_profile."
+    default: ""
+
+  benchmark_aeron_receiver_io_vector_capacity:
+    type: string
+    title: "Aeron receiver iovec capacity override"
+    description: "Optional AERON_RECEIVER_IO_VECTOR_CAPACITY override. Empty derives from benchmark_tuning_profile."
+    default: ""
+
+  benchmark_aeron_sender_io_vector_capacity:
+    type: string
+    title: "Aeron sender iovec capacity override"
+    description: "Optional AERON_SENDER_IO_VECTOR_CAPACITY override. Empty derives from benchmark_tuning_profile."
+    default: ""
+
   aeron_echo_udp_interface_prefix_length:
     type: string
     title: "Echo UDP |interface= prefix length"
-    description: "Prefix for Aeron echo channel |interface=LOCAL/prefix (Quickstart uses 24). Use 16 on typical OCI /16 subnets. Empty string omits |interface= (diagnostics). Ignored if named interface is set."
-    default: "24"
+    description: "Prefix for Aeron echo channel |interface=LOCAL/prefix. Default auto derives the mask from the private subnet CIDR (benchmark nodes). Set 16 or 24 to override. Empty omits |interface= (diagnostics). Ignored if named interface is set."
+    default: "auto"
 
   aeron_echo_udp_named_interface:
     type: string

@@ -25,10 +25,10 @@ write_files:
   - path: /etc/sysctl.d/99-aeron.conf
     content: |
       # Aeron optimizations
-      net.core.rmem_max=8388608
-      net.core.wmem_max=8388608
-      net.core.rmem_default=1048576
-      net.core.wmem_default=1048576
+      net.core.rmem_max=33554432
+      net.core.wmem_max=33554432
+      net.core.rmem_default=8388608
+      net.core.wmem_default=8388608
       net.ipv4.udp_mem=8388608 8388608 8388608
       net.core.netdev_max_backlog=30000
       net.core.optmem_max=67108864
@@ -54,49 +54,127 @@ write_files:
       * hard nproc 65535
     permissions: '0644'
 
-%{ if !hyperthreading }
-  - path: /opt/aeron/sbin/disable-hyperthreading.sh
+%{ if rdma_cloud_init_enabled }
+  - path: /usr/local/sbin/aeron-rdma-cloud-init.sh
     content: |
-      #!/bin/bash
-      for cpu in /sys/devices/system/cpu/cpu[0-9]*; do
-        cpu_id=$(basename $cpu | sed 's/cpu//')
-        if [ -f "$cpu/topology/thread_siblings_list" ]; then
-          first_sibling=$(cut -d',' -f1 "$cpu/topology/thread_siblings_list" | cut -d'-' -f1)
-          if [ "$cpu_id" != "$first_sibling" ]; then
-            echo 0 > "$cpu/online" 2>/dev/null || true
-          fi
-        fi
-      done
-      echo "Hyperthreading disabled"
-    permissions: '0755'
+      #!/usr/bin/env bash
+      set -euxo pipefail
+      exec > >(tee -a /var/log/aeron-rdma-cloud-init.log) 2>&1
 
-  - path: /etc/systemd/system/disable-hyperthreading.service
-    content: |
-      [Unit]
-      Description=Disable Hyperthreading
-      After=multi-user.target
-      
-      [Service]
-      Type=oneshot
-      ExecStart=/opt/aeron/sbin/disable-hyperthreading.sh
-      RemainAfterExit=yes
-      
-      [Install]
-      WantedBy=multi-user.target
-    permissions: '0644'
+      RDMA_INTERFACE=${jsonencode(rdma_interface)}
+      RDMA_CONFIGURE_NETPLAN=${jsonencode(rdma_configure_netplan)}
+      RDMA_IPV4_PREFIX=${jsonencode(rdma_ipv4_prefix)}
+      RDMA_IPV4_PREFIX_LENGTH=${jsonencode(rdma_ipv4_prefix_length)}
+      RDMA_MTU=${jsonencode(rdma_mtu)}
+      RDMA_APT_PACKAGES=${jsonencode(rdma_apt_packages)}
+      RDMA_USE_OCA_PLUGIN=${jsonencode(rdma_use_oca_plugin)}
+
+      export DEBIAN_FRONTEND=noninteractive
+      printf '%s\n' 'Acquire::ForceIPv4 "true";' > /etc/apt/apt.conf.d/99force-ipv4
+      apt-get -o Acquire::ForceIPv4=true update -y
+      if [ -n "$(printf '%s' "$RDMA_APT_PACKAGES" | tr -d '[:space:]')" ]; then
+        apt-get -o Acquire::ForceIPv4=true install -y --fix-missing $RDMA_APT_PACKAGES
+      fi
+
+      if [ "$RDMA_USE_OCA_PLUGIN" = "true" ]; then
+        systemctl enable --now oracle-cloud-agent || true
+      else
+        systemctl is-enabled oracle-cloud-agent >/dev/null 2>&1 && systemctl restart oracle-cloud-agent || true
+      fi
+
+      modprobe ib_core || true
+      modprobe rdma_cm || true
+      modprobe ib_uverbs || true
+      modprobe mlx5_core || true
+      modprobe mlx5_ib || true
+
+      cat >/etc/modules-load.d/aeron-rdma.conf <<'EOF'
+      ib_core
+      rdma_cm
+      ib_uverbs
+      mlx5_core
+      mlx5_ib
+      EOF
+
+      if [ "$RDMA_CONFIGURE_NETPLAN" = "true" ] && [ -n "$(printf '%s' "$RDMA_IPV4_PREFIX" | tr -d '[:space:]')" ]; then
+        primary_if="$(ip -4 route show default 0.0.0.0/0 2>/dev/null | awk '{print $5; exit}')"
+        if [ -z "$primary_if" ]; then
+          primary_if="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i=1; i<=NF; i++) if ($i == "dev") {print $(i+1); exit}}')"
+        fi
+        primary_ip="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i=1; i<=NF; i++) if ($i == "src") {print $(i+1); exit}}')"
+        if [ -z "$primary_ip" ] && [ -n "$primary_if" ]; then
+          primary_ip="$(ip -4 -o addr show dev "$primary_if" scope global | awk '{sub(/\/.*/, "", $4); print $4; exit}')"
+        fi
+        last_octet="$(printf '%s' "$primary_ip" | awk -F. 'NF == 4 {print $4}')"
+
+        candidates="$(for path in /sys/class/infiniband/*/device/net/*; do
+          [ -e "$path" ] || continue
+          dev="$(basename "$path")"
+          [ "$dev" = "$primary_if" ] && continue
+          [ "$dev" = "lo" ] && continue
+          [ -e "/sys/class/net/$dev/address" ] || continue
+          printf '%s\n' "$dev"
+        done | sort -u)"
+        preferred="$(printf '%s\n' "$candidates" | grep -E '(f0np0|p0|f0)$' | sort -V | tail -1 || true)"
+        rdma_source_if="$preferred"
+        if [ -z "$rdma_source_if" ]; then
+          rdma_source_if="$(printf '%s\n' "$candidates" | sort -V | head -1 || true)"
+        fi
+
+        if [ -z "$last_octet" ] || [ -z "$rdma_source_if" ]; then
+          echo "ERROR: unable to derive RDMA netplan config primary_ip=$primary_ip primary_if=$primary_if rdma_source_if=$rdma_source_if" >&2
+          exit 1
+        fi
+
+        rdma_mac="$(cat "/sys/class/net/$rdma_source_if/address")"
+        rdma_addr="$RDMA_IPV4_PREFIX.$last_octet/$RDMA_IPV4_PREFIX_LENGTH"
+        netplan_file="/etc/netplan/60-rdma-$RDMA_INTERFACE.yaml"
+        cat >"$netplan_file" <<EOF
+      network:
+        version: 2
+        ethernets:
+          $RDMA_INTERFACE:
+            match:
+              macaddress: "$rdma_mac"
+            set-name: "$RDMA_INTERFACE"
+            dhcp4: false
+            dhcp6: false
+            addresses:
+              - "$rdma_addr"
+            mtu: $RDMA_MTU
+            optional: true
+      EOF
+        chmod 0600 "$netplan_file"
+        netplan generate
+        netplan apply
+        udevadm settle || true
+        ip link set dev "$RDMA_INTERFACE" mtu "$RDMA_MTU" up || true
+        echo "Configured RDMA netdev $rdma_source_if as $RDMA_INTERFACE address=$rdma_addr mtu=$RDMA_MTU mac=$rdma_mac"
+      fi
+
+      command -v rdma >/dev/null 2>&1 && rdma link || true
+      command -v ibv_devices >/dev/null 2>&1 && ibv_devices || true
+      ls -la /sys/class/infiniband || true
+      ip -br link || true
+
+%{ for command in rdma_extra_commands ~}
+      ${command}
+%{ endfor ~}
+    permissions: '0755'
 %{ endif }
 
 runcmd:
+%{ if !hyperthreading }
+  - if [ -w /sys/devices/system/cpu/smt/control ]; then echo off > /sys/devices/system/cpu/smt/control; else echo off | tee /sys/devices/system/cpu/smt/control >/dev/null 2>&1 || true; fi
+%{ endif }
   - sysctl --system
   - mkdir -p /opt/aeron/sbin
   - mkdir -p /opt/aeron/logs
   - mkdir -p /opt/aeron/results
   - mkdir -p /dev/shm/aeron
   - chmod 777 /dev/shm/aeron
-%{ if !hyperthreading }
-  - systemctl daemon-reload
-  - systemctl enable disable-hyperthreading.service
-  - systemctl start disable-hyperthreading.service
+%{ if rdma_cloud_init_enabled }
+  - /usr/local/sbin/aeron-rdma-cloud-init.sh
 %{ endif }
   - echo "JAVA_HOME=/usr/lib/jvm/java-${java_version}-openjdk-amd64" >> /etc/environment
   - echo "Cloud-init complete for Aeron deployment"

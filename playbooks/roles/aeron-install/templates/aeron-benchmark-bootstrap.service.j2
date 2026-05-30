@@ -1,0 +1,12 @@
+[Unit]
+Description=Aeron benchmark bootstrap — init/sshd CPU affinity, IRQ housekeeping mask, benchmark iptables
+After=network-online.target ssh.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/aeron-benchmark-bootstrap.sh
+
+[Install]
+WantedBy=multi-user.target

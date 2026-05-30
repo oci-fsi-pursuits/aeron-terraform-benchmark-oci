@@ -1,0 +1,131 @@
+---
+# Build Mellanox libvma from https://github.com/Mellanox/libvma (see upstream README / wiki Build-Instruction).
+# Requires RDMA user-space dev stack: libibverbs, librdmacm, libmlx5 (mlx5dv.h) — not only kernel headers.
+# Typical flow: ./autogen.sh && ./configure --with-ofed=/usr ... && make && make install
+
+- name: Set libvma install libdir (explicit override)
+  ansible.builtin.set_fact:
+    _benchmark_vma_libdir: "{{ benchmark_vma_configure_libdir }}"
+  when: benchmark_vma_configure_libdir | default('') | length > 0
+
+- name: Set libvma install libdir (Debian multiarch vs RedHat)
+  ansible.builtin.set_fact:
+    _benchmark_vma_libdir: "{{ '/usr/lib64' if ansible_os_family == 'RedHat' else ('/usr/lib/' + ansible_architecture + '-linux-gnu') }}"
+  when: benchmark_vma_configure_libdir | default('') | length == 0
+
+- name: Ensure libvma source parent directory exists
+  ansible.builtin.file:
+    path: "{{ benchmark_vma_source_dir | dirname }}"
+    state: directory
+    mode: '0755'
+  become: true
+
+# Universe: some minimal images omit it; Noble+ ship mlx5 headers in libibverbs-dev (no separate libmlx5-dev).
+- name: Install add-apt-repository prerequisite (Ubuntu)
+  ansible.builtin.apt:
+    name: software-properties-common
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+    lock_timeout: 600
+  become: true
+  when: ansible_distribution == "Ubuntu"
+
+- name: Enable universe repository (Ubuntu)
+  ansible.builtin.command: add-apt-repository -y universe
+  become: true
+  register: _ubuntu_universe
+  changed_when: "'already enabled' not in (_ubuntu_universe.stdout | default('') + _ubuntu_universe.stderr | default(''))"
+  when: ansible_distribution == "Ubuntu"
+
+- name: Install libvma build dependencies (Debian/Ubuntu)
+  ansible.builtin.apt:
+    name:
+      - build-essential
+      - autoconf
+      - automake
+      - libtool
+      - pkg-config
+      - git
+      - flex
+      - bison
+      - patch
+      - unzip
+      - libnl-3-dev
+      - libnl-route-3-dev
+      - libibverbs-dev
+      - ibverbs-providers
+      - librdmacm-dev
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+    lock_timeout: 600
+  become: true
+  when: ansible_os_family == "Debian"
+
+- name: Install libvma build dependencies (RedHat / Oracle Linux)
+  ansible.builtin.dnf:
+    name:
+      - gcc
+      - gcc-c++
+      - make
+      - autoconf
+      - automake
+      - libtool
+      - pkgconfig
+      - git
+      - flex
+      - bison
+      - patch
+      - unzip
+      - libnl3-devel
+      - rdma-core-devel
+      - libibverbs-devel
+      - librdmacm-devel
+    state: present
+  become: true
+  when: ansible_os_family == "RedHat"
+
+- name: Clone libvma source
+  ansible.builtin.git:
+    repo: "{{ benchmark_vma_git_url }}"
+    dest: "{{ benchmark_vma_source_dir }}"
+    version: "{{ benchmark_vma_git_ref }}"
+    update: true
+  become: true
+  register: _benchmark_vma_git
+  until: _benchmark_vma_git is succeeded
+  retries: 6
+  delay: 20
+
+- name: Ensure libvma shell scripts are executable (zip clones / some checkouts)
+  ansible.builtin.shell: |
+    set -euo pipefail
+    find . -name '*.sh' -exec chmod a+x {} +
+  args:
+    chdir: "{{ benchmark_vma_source_dir }}"
+    executable: /bin/bash
+  changed_when: true
+  when: _benchmark_vma_git.changed | default(false)
+
+- name: Stat installed libvma at benchmark path
+  ansible.builtin.stat:
+    path: "{{ benchmark_vma_lib_path }}"
+  register: _benchmark_vma_installed_stat
+
+- name: Build and install libvma from source
+  ansible.builtin.shell: |
+    set -euo pipefail
+    cd "{{ benchmark_vma_source_dir }}"
+    ./autogen.sh
+    ./configure --with-ofed=/usr --prefix=/usr --libdir="{{ _benchmark_vma_libdir }}" --includedir=/usr/include --docdir=/usr/share/doc/libvma --sysconfdir=/etc {{ benchmark_vma_configure_extra | default('') }}
+    make -j"$(nproc)"
+    make install
+    ldconfig
+  args:
+    executable: /bin/bash
+  become: true
+  when: >-
+    (benchmark_vma_source_force_rebuild | default(false) | bool)
+    or (_benchmark_vma_git.changed | default(false))
+    or not (_benchmark_vma_installed_stat.stat.exists | default(false))

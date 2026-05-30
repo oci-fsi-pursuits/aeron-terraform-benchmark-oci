@@ -10,18 +10,18 @@ data "oci_core_services" "all_services" {
   }
 }
 
-# Default image: Ubuntu 24.04 Minimal (best for Aeron benchmarking)
+# Default image: regular Ubuntu 24.04. The Minimal image is too sparse for Terraform bootstrap.
 data "oci_core_images" "ubuntu_minimal" {
   compartment_id           = var.compartment_ocid
   operating_system         = "Canonical Ubuntu"
-  operating_system_version = "24.04 Minimal"
+  operating_system_version = "24.04"
   shape                    = var.benchmark_shape
   sort_by                  = "TIMECREATED"
   sort_order               = "DESC"
 
   filter {
     name   = "display_name"
-    values = ["^Canonical-Ubuntu-24\\.04-Minimal-.*$"]
+    values = ["^Canonical-Ubuntu-24\\.04-[0-9].*$"]
     regex  = true
   }
 }

@@ -12,6 +12,11 @@ if [[ ! -d "$BENCH_SCRIPTS" ]]; then
   echo "Missing benchmarks-dist scripts: $BENCH_SCRIPTS" >&2
   exit 1
 fi
+CLEAR_AFFINITY="$SCRIPT_DIR/config/clear-benchmark-affinity-env.sh"
+if [[ -f "$CLEAR_AFFINITY" ]]; then
+  # shellcheck source=/dev/null
+  source "$CLEAR_AFFINITY"
+fi
 set -a
 source "$CONFIG"
 set +a

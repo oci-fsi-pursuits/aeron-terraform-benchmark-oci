@@ -1,0 +1,106 @@
+# BM.Optimized3.36 RDMA cluster-network profile.
+# Copy to a local .tfvars, fill OCIDs/keys/ADs, and pick non-overlapping CIDRs.
+
+tenancy_ocid     = "ocid1.tenancy.oc1..REPLACE_WITH_YOUR_TENANCY_OCID"
+region           = "eu-frankfurt-1"
+compartment_ocid = "ocid1.compartment.oc1..REPLACE_WITH_YOUR_COMPARTMENT_OCID"
+
+ssh_public_key = "ssh-rsa AAAAB3...REPLACE_WITH_YOUR_PUBLIC_KEY comment@host"
+ssh_username   = "ubuntu"
+
+use_custom_name = true
+cluster_name    = "aeron-rdma-bmopt3"
+
+controller_ad = "REPLACE:EU-FRANKFURT-1-AD-1"
+benchmark_ad  = "REPLACE:EU-FRANKFURT-1-AD-1"
+
+controller_shape     = "VM.Standard.E6.Flex"
+controller_ocpus     = 2
+controller_memory_gb = 16
+
+benchmark_shape      = "BM.Optimized3.36"
+benchmark_node_count = 4
+benchmark_tuning_profile = "bm_rdma"
+# Provisions client + 3 full cluster members and renders
+# CLUSTER_SIZE=3 / CLUSTER_BACKUP_NODES=0 for Raft cluster benchmarking.
+enable_cluster_raft_consensus = true
+# Bare-metal shape is fixed-size; Terraform does not send shape_config to OCI.
+# This is still passed to Ansible as an affinity/topology fallback.
+benchmark_ocpus     = 36
+benchmark_memory_gb = 256
+
+enable_failover_node = false
+hyperthreading       = false
+private_deployment   = false
+
+# New VCN example. If using existing subnets, set use_existing_vcn=true and fill the subnet OCIDs.
+use_existing_vcn    = false
+vcn_cidr_block      = "10.34.0.0/16"
+public_subnet_cidr  = "10.34.0.0/24"
+private_subnet_cidr = "10.34.1.0/24"
+
+# BM.Optimized3 RDMA path that worked for Ubuntu:
+# - cluster network launches the benchmark nodes through an OCI cluster network/instance pool
+# - Oracle Cloud Agent HPC RDMA plugins are disabled
+# - cloud-init installs RDMA packages/modules and writes netplan for the 100G RoCE port
+# - cluster benchmarks use regular VCN UDP because RDMA/RoCE eth1 is not routable cross-AD
+create_benchmark_cluster_placement_group = false
+enable_benchmark_cluster_network         = true
+enable_benchmark_instance_pool           = false
+enable_rdma_compute_cluster              = false
+rdma_enable_hpc_plugins                  = false
+install_oci_cn_auth                      = false
+benchmark_cluster_udp_fabric             = "vcn"
+
+benchmark_cloud_init_rdma                  = true
+benchmark_cloud_init_rdma_interface        = "eth1"
+benchmark_cloud_init_rdma_configure_netplan = true
+# Reuses the host octet from the primary private IP:
+# 10.34.1.234 -> 10.34.100.234/24 on eth1.
+benchmark_cloud_init_rdma_ipv4_prefix    = "10.34.100"
+benchmark_cloud_init_rdma_prefix_length  = 24
+benchmark_cloud_init_rdma_mtu            = 4220
+aeron_echo_udp_interface_prefix_length   = "24"
+# Leave empty for RDMA BM. Ansible will render Aeron |interface={eth1} from
+# benchmark_cloud_init_rdma_interface when benchmark_cloud_init_rdma=true.
+aeron_echo_udp_named_interface           = ""
+
+use_default_image = true
+install_aeron     = true
+
+run_smoke_test                  = false
+run_full_benchmark              = false
+run_benchmarks_cluster_matrix   = true
+run_benchmarks_matrix_modes     = "java,c"
+benchmark_build_native_aeronmd  = true
+
+# Persistent cluster/archive storage on each benchmark node. Use iSCSI on bare metal;
+# Terraform creates one OCI block volume per benchmark node and Ansible mounts it.
+benchmark_block_volume_enabled         = true
+benchmark_block_volume_size_gb         = 256
+benchmark_block_volume_vpus_per_gb     = 120
+benchmark_block_volume_attachment_type = "iscsi"
+benchmark_block_volume_device          = "auto"
+benchmark_block_volume_mount_path      = "/mnt/aeron-cluster"
+
+# Enable these when running VMA comparisons on a provisioned RDMA stack.
+benchmark_install_vma_runtime   = true
+benchmark_vma_build_from_source = true
+benchmark_vma_apply_setcap      = false
+benchmark_vma_lib_path          = "/usr/lib/x86_64-linux-gnu/libvma.so.9"
+# bm_rdma derives:
+#   ONLOAD_COMMAND_VMA=sudo -E env AERON_SHM_USER=ubuntu AERON_DIR=/dev/shm/aeron VMA_SPEC=latency VMA_RX_POLL=-1 VMA_TRACELEVEL=0 VMA_LOG_DETAILS=0 VMA_LOG_COLORS=0 VMA_OFFLOADED_SOCKETS=1 LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libvma.so.9
+#   Aeron socket/window buffers=16m and batching/iovec=32.
+#   Cluster pins: taskset/non-isolated 20-31, hot cores 24-31 on the eth1 NUMA side.
+
+benchmark_echo_runs              = 5
+benchmark_echo_iterations        = 30
+benchmark_echo_warmup_iterations = 10
+benchmark_message_length         = 288
+benchmark_message_rate           = "101K"
+
+# Working BM.Optimized3 no-SMT baseline: 36 online CPUs, housekeeping 0-3, isolated 4-35.
+grub_dynamic_cpu_isolation = true
+grub_housekeeping_fraction = 0.17
+grub_housekeeping_floor    = 4
+grub_housekeeping_cpus_max = 4

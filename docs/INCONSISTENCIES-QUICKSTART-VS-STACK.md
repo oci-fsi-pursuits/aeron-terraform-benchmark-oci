@@ -39,7 +39,7 @@ This document lists mismatches between **aeron-benchmark-quickstart-vm-3** (sour
 |------------|---------------|----------------|
 | Pipeline: prepare-nodes → validate-nodes (reboot) → tune-nic → **deploy-artifacts** (benchmarks-dist) → run-benchmarks → aggregate-results | Single playbook: aeron-install (real-logic/aeron + scripts) + aeron-benchmark (run-benchmark.sh, config) | **No benchmarks deploy step.** Stack doesn’t build benchmarks.tar or deploy benchmarks-dist. No prepare/validate/tune/aggregate playbooks. |
 | Group vars: `benchmark_nodes` with `java_home`, `housekeeping_cpus`, `isolated_cpus`, `socket_buf`, `message_length`, `message_rate`, Aeron tuning | Group vars: `all` with `aeron_dir`, `aeron_git_repo` (real-logic/aeron), `socket_buf`, `message_length`, `message_rate`, etc. | **No `benchmarks_repo` / `benchmarks_dist_path`.** No vars for aeron-io/benchmarks URL or deploy path. |
-| Optional: GRUB CPU isolation drop-in, then **reboot**; validate isolated CPUs | Optional: GRUB drop-in when `apply_cpu_isolation_grub`; **no reboot or validate** in playbook | **No post-reboot validation.** Quickstart has validate-nodes after reboot; stack doesn’t. |
+| Optional: GRUB CPU isolation drop-in, then **reboot**; validate isolated CPUs | Optional: GRUB drop-in when `grub_dynamic_cpu_isolation` (default true); **no reboot or validate** in playbook | **No post-reboot validation.** Quickstart has validate-nodes after reboot; stack doesn’t. |
 
 ---
 

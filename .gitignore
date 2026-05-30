@@ -38,6 +38,27 @@ id_rsa*
 # Archives (never commit ad-hoc zips/tarballs that might hold credentials or state)
 *.zip
 *.tgz
+*.tar.gz
+
+# Saved Terraform plans
+tfplan*
+*.tfplan
+
+# Local benchmark/debug scratch
+tmp-*
+.codex-*
+HdrSummary.java
+_remote-*-artifacts/
+__pycache__/
+*.pyc
+aeron-*.txt
+aeron-*.csv
+cpg-capacity-results-*.jsonl
+cpu-placement-samples-*.csv
+
+# Local validation artifacts
+validation/
+validation/**/generated_key*
 
 # Pulled driver-matrix summary for terraform output (may contain latencies / paths)
 .terraform-matrix-summary.json

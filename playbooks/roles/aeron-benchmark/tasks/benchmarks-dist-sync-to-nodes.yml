@@ -1,0 +1,66 @@
+---
+# Push full benchmarks-dist (native aeronmd, Gradle tar, Ansible overlays) to benchmark + failover hosts.
+# Must run on the controller *after* benchmarks-build and after this role copies wrappers/config into
+# benchmarks_dist_path — otherwise nodes stay on an older tarball without overlays.
+
+- name: Deploy benchmarks-dist to benchmark nodes
+  shell: |
+    set -e
+    KEY="{{ aeron_dir }}/.ssh/deploy_key"
+    IPS="{{ benchmark_node_ips | default('') }}"
+    {% if failover_node_ip is defined and (failover_node_ip | default('') | trim | length > 0) %}
+    IPS="${IPS},{{ failover_node_ip | trim }}"
+    {% endif %}
+    for ip in $(echo "$IPS" | tr ',' ' '); do
+      [ -z "$ip" ] && continue
+      echo "Waiting for SSH on $ip before syncing benchmarks-dist..."
+      ready=0
+      for attempt in $(seq 1 90); do
+        if ssh -i "$KEY" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o ConnectTimeout=10 "{{ ssh_username | default('ubuntu') }}@$ip" "true" >/dev/null 2>&1; then
+          ready=1
+          break
+        fi
+        sleep 10
+      done
+      if [ "$ready" -ne 1 ]; then
+        echo "ERROR: SSH did not become ready on $ip after 15 minutes" >&2
+        exit 1
+      fi
+      ssh -i "$KEY" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o ConnectTimeout=30 "{{ ssh_username | default('ubuntu') }}@$ip" \
+        "cloud-init status --wait || true"
+      tar -C "{{ benchmarks_dist_path }}" -czf - . | ssh -i "$KEY" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "{{ ssh_username | default('ubuntu') }}@$ip" \
+        "sudo rm -rf '{{ benchmarks_dist_path }}' && sudo mkdir -p '{{ benchmarks_dist_path }}' && sudo tar -xzf - -C '{{ benchmarks_dist_path }}' && sudo chown -R {{ ssh_username | default('ubuntu') }}:{{ ssh_username | default('ubuntu') }} '{{ benchmarks_dist_path }}'"
+    done
+  when:
+    - benchmark_node_ips is defined
+    - benchmark_node_ips | default('') | length > 0
+  changed_when: true
+
+- name: Verify native aeronmd resolves libaeron on benchmark nodes (matches setcap / no LD_LIBRARY_PATH)
+  shell: |
+    set -euo pipefail
+    KEY="{{ aeron_dir }}/.ssh/deploy_key"
+    AMD="{{ benchmarks_dist_path }}/scripts/aeron/aeronmd"
+    test -f "$AMD" || exit 0
+    IPS="{{ benchmark_node_ips | default('') }}"
+    {% if failover_node_ip is defined and (failover_node_ip | default('') | trim | length > 0) %}
+    IPS="${IPS},{{ failover_node_ip | trim }}"
+    {% endif %}
+    for ip in $(echo "$IPS" | tr ',' ' '); do
+      [ -z "$ip" ] && continue
+      out="$(ssh -i "$KEY" -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=30 \
+        "{{ ssh_username | default('ubuntu') }}@$ip" \
+        "env -u LD_LIBRARY_PATH ldd '$AMD' 2>&1" || true)"
+      if echo "$out" | grep -qE 'libaeron.*=> not found'; then
+        echo "On $ip: aeronmd missing Aeron libs (env -u LD_LIBRARY_PATH ldd):" >&2
+        echo "$out" >&2
+        exit 1
+      fi
+    done
+  args:
+    executable: /bin/bash
+  when:
+    - benchmark_node_ips is defined
+    - benchmark_node_ips | default('') | length > 0
+    - benchmark_build_native_aeronmd | default(true) | bool
+  changed_when: false

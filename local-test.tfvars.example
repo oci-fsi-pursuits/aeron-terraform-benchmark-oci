@@ -5,7 +5,8 @@
 # and your SSH public key.
 #
 # Defaults (see README.md → Configuration Options): benchmark/failover E6.Flex
-# 16 OCPU / 124 GB; controller E6.Flex 2 OCPU / 16 GB. Uncomment blocks below
+# 16 OCPU / 124 GB; controller E6.Flex 2 OCPU / 16 GB. This example sizes the
+# benchmark/failover nodes at 32 OCPU / 256 GB (~8 GB/OCPU). Uncomment blocks below
 # to override git, echo tuning, UDP interface, CPU affinity, placement group, etc.
 # -----------------------------------------------------------------------------
 # Usage:
@@ -48,12 +49,20 @@ controller_memory_gb = 16
 
 benchmark_shape        = "VM.Standard.E6.Flex"
 benchmark_node_count   = 2
-benchmark_ocpus        = 16
-benchmark_memory_gb    = 124
+benchmark_ocpus        = 32
+benchmark_memory_gb    = 256
+
+# Optional RDMA compute-cluster mode (example BM.Optimized3.36):
+# benchmark_shape                   = "BM.Optimized3.36"
+# benchmark_node_count              = 3
+# benchmark_ocpus                   = 36 # Ansible affinity hint only; BM.Optimized3.36 is fixed-size.
+# enable_rdma_compute_cluster       = true
+# rdma_existing_compute_cluster_id  = "" # empty = create, or set existing OCID
+# rdma_enable_hpc_plugins           = true
 
 failover_shape     = "VM.Standard.E6.Flex"
-failover_ocpus     = 16
-failover_memory_gb = 124
+failover_ocpus     = 32
+failover_memory_gb = 256
 
 # create_benchmark_cluster_placement_group = true  # ignored when use_existing_vcn = true
 
@@ -80,20 +89,37 @@ existing_private_subnet_id = "ocid1.subnet.oc1..REPLACE"
 # -----------------------------------------------------------------------------
 use_default_image = true
 install_aeron     = true
+# install_oci_cn_auth = true # RDMA mode: installs/starts oci-cn-auth on benchmark/failover for RedHat/Oracle Linux images
 
-run_benchmarks                = false
+# Post-apply driver matrix: smoke (fast 1/1/1) vs full (long HDR-style) are separate toggles.
+run_smoke_test                = true
+run_full_benchmark            = false
 run_benchmarks_matrix_modes   = "java"
+# Runtime profile: auto resolves to vm_stable here; BM RDMA tfvars should use bm_rdma.
+benchmark_tuning_profile      = "auto"
+# Mellanox VMA (java_vma/c_vma): set benchmark_vma_lib_path to the .so on your image; Oracle Linux /usr/lib64/libvma.so.9, Ubuntu multilib /usr/lib/x86_64-linux-gnu/libvma.so.9.
+# benchmark_install_vma_runtime = true   # apt/dnf libvma where available (RHEL/OL), or use source build below on Ubuntu.
+# benchmark_vma_build_from_source = true  # compile github.com/Mellanox/libvma (needs libibverbs-dev, libmlx5-dev, etc.); pin benchmark_vma_git_ref.
+# benchmark_vma_git_ref = "master"       # use a tag for reproducible builds.
+# benchmark_vma_apply_setcap = true        # setcap cap_net_raw+ep on Java and aeronmd (recommended with VMA).
+# run_benchmarks_matrix_modes = "java,java_vma,c,c_vma"
 
 # Default echo tuning (1/1/1) is a smoke-style matrix — fast gate, not CHECKLIST.md baselines. See `terraform output benchmark_driver_matrix`.
-# After apply, median latencies appear in `terraform output benchmark_driver_matrix_summary` if OpenSSH + python can reach the controller (toggle off in CI):
-# pull_matrix_summary_for_terraform_output = false
+# Optional controller env when running ./run-driver-matrix.sh manually: BENCHMARK_QUIET_MODE=1 (stop apt/snap noise), BENCHMARK_SKIP_KERNEL_PARITY=1 (debug only).
+# Matrix JSON/CSVs are on the controller under ~/benchmark-results (not terraform output).
+
+# GRUB housekeeping: min(N, min(cap, max(floor, ceil(N * fraction)))) — handoff defaults fraction=0.17 floor=2 cap=8 (~8 CPUs at 48 OCPU). cap=0 removes upper bound.
+# grub_housekeeping_fraction = 0.17
+# grub_housekeeping_floor      = 2
+# grub_housekeeping_cpus_max   = 8
 
 # Defaults are already minimal: RUNS=1, ITERATIONS=1, warmup=1, rate=100001. For more stable HDR stats, raise e.g.:
 # benchmark_echo_iterations        = 30
 # benchmark_echo_warmup_iterations = 10
 # benchmark_message_rate           = "101K"
 
-# Echo LoadTestRig: |interface=IP/prefix — use "16" if benchmark nodes are on a /16 subnet (common on OCI).
+# Echo LoadTestRig: |interface=IP/prefix — default in Terraform is "auto" (mask from private_subnet_cidr).
+# Override only if needed, e.g. "16" when the private subnet is /16 but you use a different convention.
 # aeron_echo_udp_interface_prefix_length = "16"
 # Or Aeron 1.50+ named NIC (overrides prefix): use `ip -br a` on a benchmark node, e.g. enp0s9
 # aeron_echo_udp_named_interface = "enp0s9"

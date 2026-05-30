@@ -1,5 +1,12 @@
 {{ client_node_ip }} {{ aeron_benchmark_client_hostname }}
 {{ receiver_node_ip }} {{ aeron_benchmark_receiver_hostname }}
+{% set _benchmark_node_ips = (benchmark_node_ips | default('') | string).split(',') %}
+{% if enable_cluster_raft_consensus | default(false) | bool and (_benchmark_node_ips | length > 2) and (_benchmark_node_ips[2] | trim | length > 0) %}
+{{ _benchmark_node_ips[2] | trim }} aeron-benchmark-node1
+{% endif %}
+{% if enable_cluster_raft_consensus | default(false) | bool and (_benchmark_node_ips | length > 3) and (_benchmark_node_ips[3] | trim | length > 0) %}
+{{ _benchmark_node_ips[3] | trim }} aeron-benchmark-node2
+{% endif %}
 {% if (failover_node_ip | default('') | trim) %}
 {{ failover_node_ip }} {{ aeron_benchmark_failover_hostname }}
 {% endif %}

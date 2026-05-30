@@ -11,6 +11,13 @@ This is the simplified learning layout:
   - `/home/ubuntu/benchmarks/scripts/aggregate-compare-results.sh`
 - Optional runner for all driver modes:
   - `/home/ubuntu/benchmarks/scripts/run-driver-matrix.sh`
+- Separated full echo/cluster runners:
+  - `/home/ubuntu/benchmarks/scripts/run-echo-full-non-vma.sh`
+  - `/home/ubuntu/benchmarks/scripts/run-echo-full-vma.sh`
+  - `/home/ubuntu/benchmarks/scripts/run-cluster-full-non-vma.sh`
+  - `/home/ubuntu/benchmarks/scripts/run-cluster-full-vma.sh`
+  - `/home/ubuntu/benchmarks/scripts/run-c-vma-gcp-analog.sh`
+  - `/home/ubuntu/benchmarks/scripts/enable-vma-on-nodes.sh`
 
 Existing legacy wrappers remain in place for backward compatibility.
 
@@ -18,7 +25,7 @@ Existing legacy wrappers remain in place for backward compatibility.
 
 `benchmark-config.env` and `wrapper-echo-unified.sh` follow **Aeron Benchmarks** [remote echo](https://github.com/aeron-io/benchmarks) layout: four **`aeron:udp?endpoint=…|interface=…`** URIs.
 
-- **CIDR style** (Quick Start Appendix A): **`|interface=LOCAL_IP/PREFIX`** — default prefix **24**; use Terraform **`aeron_echo_udp_interface_prefix_length`** (e.g. **16** on /16 subnets), or **`AERON_ECHO_UDP_INTERFACE_PREFIX_LENGTH`** before sourcing.
+- **CIDR style** (Quick Start Appendix A): **`|interface=LOCAL_IP/PREFIX`** — Terraform default **`auto`** sets prefix from **`private_subnet_cidr`**; override with **`aeron_echo_udp_interface_prefix_length`** (e.g. **16**), or **`AERON_ECHO_UDP_INTERFACE_PREFIX_LENGTH`** before sourcing.
 - **Named interface (Aeron 1.50+ driver):** **`|interface={ifname}`** — set Terraform **`aeron_echo_udp_named_interface`** to the NIC carrying the private IP (e.g. **`ens3`**), or **`export AERON_ECHO_UDP_NAMED_INTERFACE=ens3`** before the wrapper. The driver parses this as **`NamedInterface`** in [aeron-io/aeron](https://github.com/aeron-io/aeron) (`{name}` or `{name}:port`). When set, it **overrides** the prefix-length mode.
 - **Omit `interface`:** **`AERON_ECHO_UDP_INTERFACE_PREFIX_LENGTH=""`** and no named interface (diagnostics).
 
@@ -114,6 +121,86 @@ cd /home/ubuntu/benchmarks/scripts
 MATRIX_MODES="java,c" \
 bash ./run-driver-matrix.sh cluster
 ```
+
+## C/VMA GCP-Analog Lane
+
+Use this to mirror the GCP `c-dpdk` comparison axis without DPDK: it runs `c` vs `c_vma` for echo and cluster, at `101K` and `1001K` by default, and stores status, logs, archives, and an aggregate CSV under `~/benchmark-results/runs/<run-id>/`.
+
+```bash
+cd /home/ubuntu/benchmarks/scripts
+bash ./run-c-vma-gcp-analog.sh
+```
+
+Common quick variants:
+
+```bash
+# Echo-only smoke pass
+ANALOG_TARGETS=echo ANALOG_RATES=101K ANALOG_RUNS=1 ANALOG_ITERATIONS=3 bash ./run-c-vma-gcp-analog.sh
+
+# Cluster-only publishable-style pass
+ANALOG_TARGETS=cluster ANALOG_RATES=101K,1001K ANALOG_RUNS=5 ANALOG_ITERATIONS=30 bash ./run-c-vma-gcp-analog.sh
+```
+
+## Run separated full benchmarks
+
+Use these when comparing VMA against non-VMA. They run `101K` and `1001K` by default and keep VMA and non-VMA state in separate wrapper processes.
+
+Echo, non-VMA only:
+
+```bash
+cd /home/ubuntu/benchmarks/scripts
+bash ./run-echo-full-non-vma.sh
+```
+
+Echo, VMA only:
+
+```bash
+cd /home/ubuntu/benchmarks/scripts
+bash ./run-echo-full-vma.sh
+```
+
+Cluster, non-VMA only:
+
+```bash
+cd /home/ubuntu/benchmarks/scripts
+bash ./run-cluster-full-non-vma.sh
+```
+
+Cluster, VMA only:
+
+```bash
+cd /home/ubuntu/benchmarks/scripts
+bash ./run-cluster-full-vma.sh
+```
+
+The VMA prep script can also be run directly:
+
+```bash
+cd /home/ubuntu/benchmarks/scripts
+bash ./enable-vma-on-nodes.sh status
+bash ./enable-vma-on-nodes.sh enable
+bash ./enable-vma-on-nodes.sh disable
+```
+
+Useful overrides:
+
+```bash
+FULL_BENCH_RATES="101K,1001K" \
+FULL_BENCH_MODES="java,c" \
+FULL_BENCH_RUNS=5 \
+FULL_BENCH_ITERATIONS=30 \
+bash ./run-echo-full-non-vma.sh
+
+VMA_RUN_AS_ROOT=1 \
+FULL_BENCH_MODES="java_vma,c_vma" \
+bash ./run-echo-full-vma.sh
+
+CLUSTER_BACKUP_ENABLE_VMA=1 \
+VMA_RUN_AS_ROOT=1 \
+bash ./run-cluster-full-vma.sh
+```
+
+Results are written under `~/benchmark-results/runs/<run-id>/`; `~/benchmark-results/latest-run.txt` points at the newest separated run. The VMA wrappers default to `sudo -E env LD_PRELOAD=<libvma>` and remove file capabilities from native Aeron binaries so `LD_PRELOAD` is not silently ignored by Linux secure-exec. The cluster VMA wrapper also defaults `CLUSTER_BACKUP_ENABLE_VMA=1` so the failover/backup path is prepared with the same VMA intent.
 
 ## Aggregate and compare archives directly
 

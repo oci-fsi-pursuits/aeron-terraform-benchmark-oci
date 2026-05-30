@@ -5,6 +5,26 @@
 - name: Stable benchmark hostnames in /etc/hosts (controller + benchmark + failover nodes)
   ansible.builtin.import_tasks: etc-hosts-benchmark.yml
 
+- name: RDMA fabric networking on benchmark nodes
+  ansible.builtin.import_tasks: benchmark-rdma-network.yml
+  when:
+    - benchmark_cloud_init_rdma | default(false) | bool
+    - benchmark_cloud_init_rdma_configure_netplan | default(true) | bool
+    - node_role | default('') in ['client', 'receiver', 'node1', 'node2', 'node3', 'node4', 'failover']
+
+- name: Numactl prerequisite for echo/cluster wrappers (before config and matrix)
+  ansible.builtin.import_tasks: numactl-benchmark-prereq.yml
+
+- name: Mellanox VMA runtime (libvma) on benchmark nodes
+  ansible.builtin.import_tasks: benchmark-vma-runtime.yml
+  when: node_role | default('') in ['client', 'receiver', 'node1', 'node2', 'node3', 'node4', 'failover']
+
+- name: Dedicated benchmark data block volume
+  ansible.builtin.import_tasks: benchmark-block-volume.yml
+  when:
+    - benchmark_block_volume_enabled | default(false) | bool
+    - node_role | default('') in ['client', 'receiver', 'node1', 'node2', 'node3', 'node4']
+
 - name: Create benchmark and scripts directories
   file:
     path: "{{ item }}"
@@ -51,11 +71,27 @@
     dest: "{{ aeron_dir }}/scripts/config/benchmark-config.env"
     mode: '0644'
 
+- name: Install affinity env clearer (source before benchmark-config.env; hermetic pinning)
+  copy:
+    src: wrappers/clear-benchmark-affinity-env.sh
+    dest: "{{ aeron_dir }}/scripts/config/clear-benchmark-affinity-env.sh"
+    mode: '0644'
+
 - name: Create run-echo-benchmark launcher (sources config, runs wrapper)
   template:
     src: run-echo-benchmark.sh.j2
     dest: "{{ aeron_dir }}/scripts/run-echo-benchmark.sh"
     mode: '0755'
+
+- name: Copy benchmark histogram consolidation helpers (controller only)
+  copy:
+    src: "stack-scripts/{{ item }}"
+    dest: "{{ aeron_dir }}/scripts/{{ item }}"
+    mode: '0755'
+  loop:
+    - consolidate-benchmark-histograms.py
+    - generate-benchmark-summary-csvs.sh
+  when: node_role | default('') == 'controller'
 
 - name: Copy benchmark wrapper scripts to benchmarks-dist/scripts (controller only)
   copy:
@@ -67,8 +103,18 @@
     - wrapper-cluster-unified.sh
     - aggregate-compare-results.sh
     - run-driver-matrix.sh
+    - run-echo-full-non-vma.sh
+    - run-echo-full-vma.sh
+    - run-cluster-full-non-vma.sh
+    - run-cluster-full-vma.sh
+    - run-cluster-benchmark.sh
+    - run-c-vma-gcp-analog.sh
+    - preload-benchmark-env.sh
+    - generate-echo-wrapper-env.sh
+    - enable-vma-on-nodes.sh
     - echo-benchmark-debug.sh
     - sanitize-benchmark-config-env.sh
+    - clear-benchmark-affinity-env.sh
   when: node_role | default('') == 'controller' and (benchmarks_dist_path | default('')) != ''
 
 - name: Ensure benchmarks scripts config directory exists (controller only)
@@ -84,6 +130,39 @@
     dest: "{{ benchmarks_dist_path }}/scripts/config/benchmark-config.env"
     mode: '0644'
   when: node_role | default('') == 'controller' and (benchmarks_dist_path | default('')) != ''
+
+- name: Copy affinity clearer into benchmarks scripts config (controller only)
+  copy:
+    src: wrappers/clear-benchmark-affinity-env.sh
+    dest: "{{ benchmarks_dist_path }}/scripts/config/clear-benchmark-affinity-env.sh"
+    mode: '0644'
+  when: node_role | default('') == 'controller' and (benchmarks_dist_path | default('')) != ''
+
+- name: Install cluster benchmark home launchers (controller only)
+  copy:
+    src: "wrappers/run-cluster-benchmark.sh"
+    dest: "/home/{{ ssh_username | default('ubuntu') }}/{{ item }}"
+    mode: '0755'
+  loop:
+    - run-cluster-benchmark.sh
+    - run-cluster-java-vma-101k.sh
+    - run-cluster-java-vma-1001k.sh
+  when: node_role | default('') == 'controller'
+
+# After native build + Gradle extract + Ansible overlays on the controller, push the full tree to clients.
+- name: Sync benchmarks-dist tarball to benchmark hosts (after overlays)
+  ansible.builtin.import_tasks: benchmarks-dist-sync-to-nodes.yml
+  when: node_role | default('') == 'controller'
+
+- name: Optional benchmark host quiet mode (systemd stop/mask noisy services)
+  ansible.builtin.import_tasks: benchmark-host-quiet.yml
+  tags: [benchmark_host_quiet]
+
+- name: VMA capabilities on Java and aeronmd (benchmark / failover nodes)
+  ansible.builtin.import_tasks: benchmark-vma-setcap.yml
+  when:
+    - benchmark_vma_apply_setcap | default(false) | bool
+    - node_role | default('') in ['client', 'receiver', 'node1', 'node2', 'node3', 'node4', 'failover']
 
 - name: Create benchmark README
   copy:
