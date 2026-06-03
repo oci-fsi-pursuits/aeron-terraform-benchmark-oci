@@ -12,6 +12,12 @@
     - benchmark_cloud_init_rdma_configure_netplan | default(true) | bool
     - node_role | default('') in ['client', 'receiver', 'node1', 'node2', 'node3', 'node4', 'failover']
 
+- name: Benchmark NIC steering for echo and cluster UDP paths
+  ansible.builtin.import_tasks: benchmark-nic-steering.yml
+  when:
+    - benchmark_nic_steering_enabled | default(true) | bool
+    - node_role | default('') in ['client', 'receiver', 'node1', 'node2', 'node3', 'node4', 'failover']
+
 - name: Numactl prerequisite for echo/cluster wrappers (before config and matrix)
   ansible.builtin.import_tasks: numactl-benchmark-prereq.yml
 

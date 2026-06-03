@@ -1,0 +1,33 @@
+---
+- name: Install Aeron benchmark NIC steering script
+  ansible.builtin.template:
+    src: aeron-benchmark-nic-steering.sh.j2
+    dest: /usr/local/sbin/aeron-benchmark-nic-steering.sh
+    mode: "0755"
+  become: true
+  register: aeron_benchmark_nic_steering_script
+
+- name: Install Aeron benchmark NIC steering service
+  ansible.builtin.template:
+    src: aeron-benchmark-nic-steering.service.j2
+    dest: /etc/systemd/system/aeron-benchmark-nic-steering.service
+    mode: "0644"
+  become: true
+  register: aeron_benchmark_nic_steering_service
+
+- name: Enable and run Aeron benchmark NIC steering service
+  ansible.builtin.systemd:
+    name: aeron-benchmark-nic-steering.service
+    enabled: true
+    daemon_reload: "{{ aeron_benchmark_nic_steering_service.changed | default(false) }}"
+    state: started
+  become: true
+
+- name: Re-run Aeron benchmark NIC steering after script/config changes
+  ansible.builtin.systemd:
+    name: aeron-benchmark-nic-steering.service
+    state: restarted
+  become: true
+  when:
+    - aeron_benchmark_nic_steering_script.changed | default(false)
+      or aeron_benchmark_nic_steering_service.changed | default(false)

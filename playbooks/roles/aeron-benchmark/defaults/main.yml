@@ -50,3 +50,17 @@ benchmark_block_volume_mount_opts: "defaults,noatime,nodiratime,nofail,stripe=25
 
 # Cluster benchmark UDP path. Use vcn for cross-AD Raft clusters; RDMA/RoCE fabric is only valid when every member can use it.
 benchmark_cluster_udp_fabric: "auto"
+
+# Persistent NIC/IRQ queue steering for benchmark hosts.
+# RDMA echo keeps eth1 quiet by disabling RPS/XPS and pinning NIC IRQs to housekeeping CPUs.
+# Cross-AD cluster over VCN pins the primary VCN NIC IRQ/RPS/XPS path to housekeeping CPUs
+# while avoiding CPU0 when possible. Set benchmark_vcn_steering_cpus explicitly to override.
+benchmark_nic_steering_enabled: true
+benchmark_rdma_echo_nic_steering_enabled: true
+benchmark_vcn_cluster_nic_steering_enabled: true
+benchmark_vcn_steering_interface: "auto"
+benchmark_vcn_steering_cpus: "auto"
+benchmark_rdma_steering_cpus: "auto"
+benchmark_vcn_steering_rps_sock_flow_entries: 32768
+benchmark_vcn_steering_rps_flow_cnt: 4096
+benchmark_nic_steering_disable_coalesce: true

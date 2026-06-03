@@ -1,0 +1,12 @@
+[Unit]
+Description=Aeron benchmark NIC steering for echo and cluster UDP paths
+After=network-online.target aeron-benchmark-bootstrap.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/aeron-benchmark-nic-steering.sh
+
+[Install]
+WantedBy=multi-user.target

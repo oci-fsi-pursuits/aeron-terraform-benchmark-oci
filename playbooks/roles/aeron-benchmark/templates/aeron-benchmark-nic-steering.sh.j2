@@ -1,0 +1,203 @@
+#!/usr/bin/env bash
+# Persistent Aeron benchmark NIC policy.
+# - Echo on BM/RDMA uses eth1/RoCE and keeps kernel RPS/XPS out of that path.
+# - Cross-AD Raft cluster uses regular VCN UDP and steers VCN IRQ/RPS/XPS to housekeeping CPUs.
+set -euo pipefail
+
+CLUSTER_UDP_FABRIC="{{ benchmark_cluster_udp_fabric | default('auto') | trim | lower }}"
+RDMA_ENABLED="{{ '1' if (benchmark_cloud_init_rdma | default(false) | bool) else '0' }}"
+RDMA_IFACE="{{ benchmark_cloud_init_rdma_interface | default('eth1') }}"
+VCN_IFACE_CONFIG="{{ benchmark_vcn_steering_interface | default('auto') }}"
+VCN_CPUS_CONFIG="{{ benchmark_vcn_steering_cpus | default('auto') }}"
+RDMA_CPUS_CONFIG="{{ benchmark_rdma_steering_cpus | default('auto') }}"
+HK_CPUS="{{ housekeeping_cpus | default('0-1') }}"
+RPS_SOCK_FLOW_ENTRIES="{{ benchmark_vcn_steering_rps_sock_flow_entries | default(32768) }}"
+RPS_FLOW_CNT="{{ benchmark_vcn_steering_rps_flow_cnt | default(4096) }}"
+DISABLE_COALESCE="{{ '1' if (benchmark_nic_steering_disable_coalesce | default(true) | bool) else '0' }}"
+ENABLE_RDMA_ECHO="{{ '1' if (benchmark_rdma_echo_nic_steering_enabled | default(true) | bool) else '0' }}"
+ENABLE_VCN_CLUSTER="{{ '1' if (benchmark_vcn_cluster_nic_steering_enabled | default(true) | bool) else '0' }}"
+
+if [[ -f /opt/aeron/housekeeping-cpus ]]; then
+  HK_CPUS="$(tr -d '[:space:]' < /opt/aeron/housekeeping-cpus || printf '%s' "${HK_CPUS}")"
+fi
+
+log() {
+  echo "aeron-benchmark-nic-steering: $*"
+}
+
+cpulist_to_mask() {
+  local cpulist="$1"
+  python3 - "$cpulist" <<'PY'
+import sys
+
+raw = sys.argv[1].strip()
+cpus = set()
+for part in raw.split(","):
+    part = part.strip()
+    if not part:
+        continue
+    if "-" in part:
+        start, end = part.split("-", 1)
+        cpus.update(range(int(start), int(end) + 1))
+    else:
+        cpus.add(int(part))
+if not cpus:
+    raise SystemExit(1)
+groups = []
+for group_start in range(0, max(cpus) + 1, 32):
+    value = 0
+    for cpu in cpus:
+        if group_start <= cpu < group_start + 32:
+            value |= 1 << (cpu - group_start)
+    groups.append(f"{value:08x}")
+print(",".join(groups))
+PY
+}
+
+normalize_cpulist() {
+  local requested="$1"
+  local fallback="$2"
+  python3 - "$requested" "$fallback" <<'PY'
+import os
+import sys
+
+def expand(raw):
+    cpus = []
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            start, end = part.split("-", 1)
+            cpus.extend(range(int(start), int(end) + 1))
+        else:
+            cpus.append(int(part))
+    return cpus
+
+def compress(cpus):
+    cpus = sorted(set(cpus))
+    if not cpus:
+        return ""
+    ranges = []
+    start = prev = cpus[0]
+    for cpu in cpus[1:]:
+        if cpu == prev + 1:
+            prev = cpu
+            continue
+        ranges.append(f"{start}-{prev}" if start != prev else str(start))
+        start = prev = cpu
+    ranges.append(f"{start}-{prev}" if start != prev else str(start))
+    return ",".join(ranges)
+
+requested, fallback = sys.argv[1], sys.argv[2]
+online = set(expand(open("/sys/devices/system/cpu/online", encoding="utf-8").read().strip()))
+source = fallback if requested == "auto" else requested
+cpus = [cpu for cpu in expand(source) if cpu in online]
+
+# For auto VCN steering, keep CPU0 free when there are other housekeeping CPUs.
+if requested == "auto" and 0 in cpus and len(cpus) > 1:
+    cpus = [cpu for cpu in cpus if cpu != 0]
+
+print(compress(cpus))
+PY
+}
+
+interface_pci() {
+  local iface="$1"
+  [[ -e "/sys/class/net/${iface}/device" ]] || return 1
+  basename "$(readlink -f "/sys/class/net/${iface}/device")"
+}
+
+default_vcn_iface() {
+  local iface
+  iface="$(ip -4 route show default 0.0.0.0/0 2>/dev/null | awk '{print $5; exit}')"
+  if [[ -n "${iface}" && -d "/sys/class/net/${iface}" ]]; then
+    printf '%s\n' "${iface}"
+    return 0
+  fi
+  ip -o -4 addr show scope global | awk '$2 != "lo" {print $2; exit}'
+}
+
+set_irq_affinity_for_iface() {
+  local iface="$1"
+  local cpus="$2"
+  local pci
+  pci="$(interface_pci "${iface}" 2>/dev/null || true)"
+  [[ -n "${pci}" ]] || return 0
+  awk -v pci="${pci}" -v iface="${iface}" '
+    index($0, pci) || index($0, iface) {
+      gsub(":", "", $1)
+      print $1
+    }
+  ' /proc/interrupts 2>/dev/null | while read -r irq; do
+    [[ "${irq}" =~ ^[0-9]+$ ]] || continue
+    echo "${cpus}" > "/proc/irq/${irq}/smp_affinity_list" 2>/dev/null || true
+  done
+}
+
+disable_queue_rps_xps() {
+  local iface="$1"
+  for q in "/sys/class/net/${iface}"/queues/rx-*/rps_cpus; do
+    [[ -e "${q}" ]] && echo 0 > "${q}" 2>/dev/null || true
+  done
+  for q in "/sys/class/net/${iface}"/queues/tx-*/xps_cpus; do
+    [[ -e "${q}" ]] && echo 0 > "${q}" 2>/dev/null || true
+  done
+}
+
+steer_queue_rps_xps() {
+  local iface="$1"
+  local mask="$2"
+  sysctl -w "net.core.rps_sock_flow_entries=${RPS_SOCK_FLOW_ENTRIES}" >/dev/null 2>&1 || true
+  for q in "/sys/class/net/${iface}"/queues/rx-*; do
+    [[ -d "${q}" ]] || continue
+    [[ -e "${q}/rps_cpus" ]] && echo "${mask}" > "${q}/rps_cpus" 2>/dev/null || true
+    [[ -e "${q}/rps_flow_cnt" ]] && echo "${RPS_FLOW_CNT}" > "${q}/rps_flow_cnt" 2>/dev/null || true
+  done
+  for q in "/sys/class/net/${iface}"/queues/tx-*/xps_cpus; do
+    [[ -e "${q}" ]] && echo "${mask}" > "${q}" 2>/dev/null || true
+  done
+}
+
+disable_coalesce() {
+  local iface="$1"
+  if [[ "${DISABLE_COALESCE}" == "1" ]] && command -v ethtool >/dev/null 2>&1; then
+    ethtool -C "${iface}" adaptive-rx off adaptive-tx off rx-usecs 0 tx-usecs 0 >/dev/null 2>&1 || true
+  fi
+}
+
+if [[ "${ENABLE_RDMA_ECHO}" == "1" && "${RDMA_ENABLED}" == "1" && -d "/sys/class/net/${RDMA_IFACE}" ]]; then
+  rdma_cpus="$(normalize_cpulist "${RDMA_CPUS_CONFIG}" "${HK_CPUS}")"
+  if [[ -n "${rdma_cpus}" ]]; then
+    set_irq_affinity_for_iface "${RDMA_IFACE}" "${rdma_cpus}"
+  fi
+  disable_queue_rps_xps "${RDMA_IFACE}"
+  disable_coalesce "${RDMA_IFACE}"
+  log "rdma_echo iface=${RDMA_IFACE} irq_cpus=${rdma_cpus:-none} rps=0 xps=0"
+fi
+
+cluster_uses_vcn=0
+if [[ "${CLUSTER_UDP_FABRIC}" == "vcn" || ( "${CLUSTER_UDP_FABRIC}" == "auto" && "${RDMA_ENABLED}" != "1" ) ]]; then
+  cluster_uses_vcn=1
+fi
+
+if [[ "${ENABLE_VCN_CLUSTER}" == "1" && "${cluster_uses_vcn}" == "1" ]]; then
+  vcn_iface="${VCN_IFACE_CONFIG}"
+  if [[ -z "${vcn_iface}" || "${vcn_iface}" == "auto" ]]; then
+    vcn_iface="$(default_vcn_iface || true)"
+  fi
+  if [[ -n "${vcn_iface}" && -d "/sys/class/net/${vcn_iface}" ]]; then
+    vcn_cpus="$(normalize_cpulist "${VCN_CPUS_CONFIG}" "${HK_CPUS}")"
+    if [[ -n "${vcn_cpus}" ]]; then
+      vcn_mask="$(cpulist_to_mask "${vcn_cpus}")"
+      set_irq_affinity_for_iface "${vcn_iface}" "${vcn_cpus}"
+      steer_queue_rps_xps "${vcn_iface}" "${vcn_mask}"
+      disable_coalesce "${vcn_iface}"
+      log "vcn_cluster iface=${vcn_iface} cpus=${vcn_cpus} mask=${vcn_mask}"
+    else
+      log "vcn_cluster iface=${vcn_iface} skipped: no valid CPUs from ${VCN_CPUS_CONFIG}/${HK_CPUS}"
+    fi
+  else
+    log "vcn_cluster skipped: interface not found (${vcn_iface:-auto})"
+  fi
+fi

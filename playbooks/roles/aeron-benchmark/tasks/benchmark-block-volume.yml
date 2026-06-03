@@ -132,6 +132,57 @@
     opts: "{{ benchmark_block_volume_mount_opts | default('defaults,noatime,nodiratime,nofail,stripe=256') }}"
     state: mounted
 
+- name: Rescan benchmark data block volume after online resize
+  ansible.builtin.shell: |
+    set -e
+    dev="$(readlink -f "$(cat /run/aeron-benchmark-data-device)")"
+    target_bytes=$(( {{ benchmark_block_volume_size_gb | default(0) | int }} * 1024 * 1024 * 1024 ))
+    [ "${target_bytes}" -gt 0 ] || exit 0
+
+    current_bytes="$(blockdev --getsize64 "${dev}")"
+    [ "${current_bytes}" -lt "${target_bytes}" ] || exit 0
+
+    if command -v iscsiadm >/dev/null 2>&1; then
+      iscsiadm -m session --rescan || true
+    fi
+
+    for rescan in /sys/class/block/sd*/device/rescan; do
+      [ -e "${rescan}" ] || continue
+      echo 1 > "${rescan}" || true
+    done
+
+    if command -v multipath >/dev/null 2>&1; then
+      multipath -r || true
+    fi
+
+    if [ -e "/sys/class/block/$(basename "${dev}")/dm/name" ] && command -v multipathd >/dev/null 2>&1; then
+      map_name="$(cat "/sys/class/block/$(basename "${dev}")/dm/name")"
+      multipathd resize map "${map_name}" || true
+    fi
+
+    udevadm settle || true
+    new_bytes="$(blockdev --getsize64 "${dev}")"
+    if [ "${new_bytes}" -gt "${current_bytes}" ]; then
+      echo "block-device-resized ${current_bytes} -> ${new_bytes}"
+    fi
+  args:
+    executable: /bin/bash
+  register: benchmark_data_rescan_resize
+  changed_when: "'block-device-resized' in benchmark_data_rescan_resize.stdout"
+
+- name: Grow benchmark data filesystem to attached volume size
+  ansible.builtin.shell: |
+    set -e
+    dev="$(cat /run/aeron-benchmark-data-device)"
+    fstype="$(blkid -c /dev/null -s TYPE -o value "${dev}")"
+    if [ "${fstype}" = "ext4" ]; then
+      resize2fs "${dev}"
+    fi
+  args:
+    executable: /bin/bash
+  register: benchmark_data_resize
+  changed_when: "'The filesystem is already' not in benchmark_data_resize.stdout and 'The filesystem is already' not in benchmark_data_resize.stderr"
+
 - name: Ensure benchmark data mount ownership
   ansible.builtin.file:
     path: "{{ benchmark_block_volume_mount_path | default('/mnt/aeron-cluster') }}"
